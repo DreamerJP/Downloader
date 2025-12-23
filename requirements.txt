@@ -1,0 +1,15 @@
+# Core dependencies
+PyQt6>=6.5.0
+matplotlib>=3.7.0
+numpy>=1.24.0
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Optional dependencies for enhanced features
+Pillow>=10.0.0  # For image processing
+pyinstaller>=6.0.0  # For building executables
+
+# Development dependencies
+pytest>=7.4.0
+black>=23.0.0
+flake8>=6.0.0
