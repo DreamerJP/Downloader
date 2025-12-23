@@ -62,7 +62,7 @@ pip install PyQt6 matplotlib requests urllib3
 ### Interface Básica
 1. **URL**: Cole o link do arquivo para download
 2. **Destino**: Escolha onde salvar o arquivo
-3. **Threads**: Ajuste o número de conexões (recomendado: 8-32)
+3. **Threads**: Ajuste o número de conexões (recomendado: 512)
 4. **Iniciar**: Clique para começar o download
 
 ### Configurações Avançadas
