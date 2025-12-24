@@ -1,11 +1,12 @@
 {
     "version": "1.5",
-    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v1.5/Downloader.exe",
+    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v1.4/Downloader.exe",
     "changelog": [
         "Nova versão com melhorias significativas",
         "Correções de bugs e otimizações",
         "Nova funcionalidade de atualização automática"
     ]
 }
+
 
 
