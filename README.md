@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![PyQt6](https://img.shields.io/badge/PyQt6-6.0+-green.svg)
 ![License](https://img.shields.io/badge/License-Apache--2.0-yellow.svg)
-![Version](https://img.shields.io/badge/Version-1.2-red.svg)
+![Version](https://img.shields.io/badge/Version-1.4-red.svg)
 
 ## ✨ Características Principais
 
@@ -38,7 +38,7 @@
 - **PyQt6**: Para interface gráfica
 - **matplotlib**: Para gráficos de velocidade
 - **requests**: Para downloads HTTP
-- **Sistema Operacional**: Windows, macOS, Linux
+- **Sistema Operacional**: Windows
 
 ## 🚀 Instalação
 
@@ -55,7 +55,6 @@ pip install PyQt6 matplotlib requests urllib3
 ### Método 3: Executável (Windows)
 1. Baixe o executável mais recente das [Releases](https://github.com/DreamerJP/Downloader/releases)
 2. Execute o arquivo `.exe`
-3. O programa será instalado automaticamente
 
 ## 📖 Como Usar
 
@@ -111,9 +110,3 @@ pip install pyinstaller
 pyinstaller --onefile --windowed --icon=ico.ico Downloader.py
 ```
 
-## 📊 Métricas e Desempenho
-
-- **Velocidades**: Até 10x mais rápido que downloads convencionais
-- **Confiabilidade**: Sistema robusto com tratamento de erros
-- **Compatibilidade**: Suporte a diversos formatos e protocolos
-- **Eficiência**: Otimização automática baseada no conteúdo
