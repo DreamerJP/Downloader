@@ -8,6 +8,10 @@ import json
 import hashlib
 import threading
 import random
+import tempfile
+import subprocess
+import shutil
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from datetime import datetime
@@ -15,6 +19,58 @@ from pathlib import Path
 import requests
 import requests.adapters
 from urllib3.util.retry import Retry
+
+
+def get_resource_path(relative_path):
+    """Obtém o caminho absoluto para um recurso, considerando se está em modo desenvolvimento ou executável."""
+    if getattr(sys, "frozen", False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+
+def handle_rmtree_error(func, path, exc_info):
+    """Manipulador de erros para shutil.rmtree: ajusta permissões para permitir a exclusão."""
+    import stat
+
+    if not os.access(path, os.W_OK):
+        os.chmod(path, stat.S_IWUSR)
+        func(path)
+    else:
+        raise
+
+
+def cleanup_old_temp_dirs():
+    """
+    Limpa diretórios temporários antigos (_MEI*) no diretório do executável.
+    Essa função é executada no início do programa para evitar acúmulo de pastas temporárias.
+    """
+    try:
+        if not getattr(sys, "frozen", False):
+            return
+
+        exe_dir = os.path.dirname(sys.executable)
+        current_temp_dir = getattr(sys, "_MEIPASS", None)
+
+        for entry in os.listdir(exe_dir):
+            entry_path = os.path.join(exe_dir, entry)
+
+            if (
+                os.path.isdir(entry_path)
+                and entry.startswith("_MEI")
+                and entry_path != current_temp_dir
+            ):
+                print(f"[CLEANUP] Tentando excluir: {entry_path}")
+                try:
+                    shutil.rmtree(entry_path, ignore_errors=True)
+                    print(f"[CLEANUP] Diretório excluído: {entry_path}")
+                except Exception as e:
+                    print(f"[CLEANUP] Erro ao excluir {entry_path}: {str(e)}")
+
+    except Exception as main_error:
+        print(f"[CLEANUP] Erro crítico durante a limpeza: {str(main_error)}")
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSpinBox, QTextEdit, QProgressBar,
@@ -36,18 +92,18 @@ import numpy as np
 # Configurações de chunk size
 CHUNK_SIZE = 1024 * 1024 * 2  # 2MB por leitura
 SMALL_CHUNK_SIZE = 1024 * 256  # 256KB para arquivos pequenos
-LARGE_CHUNK_SIZE = 1024 * 1024 * 4  # 4MB para arquivos muito grandes
+LARGE_CHUNK_SIZE = 1024 * 1024 * 6  # 6MB
 RETRY_LIMIT = 3  # Número máximo de tentativas
 RETRY_BACKOFF = 1.1  # Backoff mínimo
 TEMP_DIR = ".download_parts"
 HISTORY_FILE = ".download_history.json"
-UPDATE_INTERVAL = 50  # ms para atualização da UI (mais frequente)
+UPDATE_INTERVAL = 200  # ms para atualização da UI
 
 # Configurações de rede
 REQUEST_TIMEOUT = 15
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 10
-MAX_CONNECTIONS_PER_HOST = 4096  # Aumentado para máxima flexibilidade
+MAX_CONNECTIONS_PER_HOST = 4096
 TCP_KEEPALIVE = True
 TCP_NODELAY = True
 
@@ -99,9 +155,6 @@ class Updater:
             progress_callback (callable): Função para atualizar progresso do download.
         """
         try:
-            import tempfile
-            import subprocess
-            import os
 
             current_exe = sys.executable
             print(f"[DEBUG] Caminho atual: {current_exe}")
@@ -250,16 +303,20 @@ class SpeedCalculator:
     """Calcula velocidade de download com média móvel e métricas avançadas"""
     def __init__(self, window_size=20):
         self.samples = []
-        self.all_samples = []  # Histórico completo para média geral
         self.window_size = window_size
         self.last_time = time.time()
         self.last_bytes = 0
         self.peak_speed = 0
         self.total_samples = 0
-
-        # Para cálculo de velocidade mais preciso
+        
         self.time_history = []
         self.bytes_history = []
+        
+        
+        self.total_bytes_downloaded = 0
+        self.total_time_elapsed = 0
+        self.start_timestamp = None
+        self.end_timestamp = None
 
     def add_sample(self, total_bytes):
         now = time.time()
@@ -287,7 +344,7 @@ class SpeedCalculator:
                 time_diff = recent_times[i] - recent_times[i-1]
                 bytes_diff = recent_bytes[i] - recent_bytes[i-1]
 
-                if time_diff > 0.01:  # Evitar divisões por zero ou valores muito pequenos
+                if time_diff > 0.1:  # Evitar divisões por zero (100ms mínimo)
                     instant_speed = bytes_diff / time_diff
                     if instant_speed >= 0:  # Apenas velocidades positivas
                         instant_speeds.append(instant_speed)
@@ -295,12 +352,15 @@ class SpeedCalculator:
             # Velocidade atual é a média das velocidades instantâneas recentes
             if instant_speeds:
                 current_speed = sum(instant_speeds) / len(instant_speeds)
-
-
+                
                 self.samples.append(current_speed)
-                self.all_samples.append(current_speed)
                 self.total_samples += 1
                 self.peak_speed = max(self.peak_speed, current_speed)
+                
+                self.total_bytes_downloaded = total_bytes
+                if self.start_timestamp is None:
+                    self.start_timestamp = self.time_history[0]
+                self.total_time_elapsed = now - self.start_timestamp
 
                 if len(self.samples) > self.window_size:
                     self.samples.pop(0)
@@ -312,9 +372,9 @@ class SpeedCalculator:
 
     def get_average_speed(self):
         """Velocidade média geral baseada em todo o histórico"""
-        if not self.all_samples:
+        if self.total_time_elapsed == 0:
             return 0
-        return sum(self.all_samples) / len(self.all_samples)
+        return self.total_bytes_downloaded / self.total_time_elapsed
 
     def get_peak_speed(self):
         return self.peak_speed
@@ -323,11 +383,13 @@ class SpeedCalculator:
         speed = self.get_speed()
         if speed == 0 or total == 0:
             return "Calculando..."
-
+        
         remaining = total - downloaded
         seconds = remaining / speed
-
-        if seconds < 60:
+        
+        if seconds < 0:
+            return "Finalizando..."
+        elif seconds < 60:
             return f"{int(seconds)}s"
         elif seconds < 3600:
             return f"{int(seconds/60)}m {int(seconds%60)}s"
@@ -339,13 +401,37 @@ class SpeedCalculator:
     def reset(self):
         """Reinicia o calculador para novo download"""
         self.samples = []
-        self.all_samples = []  # Limpar histórico completo também
         self.time_history = []
         self.bytes_history = []
         self.last_time = time.time()
         self.last_bytes = 0
         self.peak_speed = 0
         self.total_samples = 0
+        
+        self.total_bytes_downloaded = 0
+        self.total_time_elapsed = 0
+        self.start_timestamp = None
+        self.end_timestamp = None
+
+    def stop_tracking(self):
+        """Para a contagem de tempo para fixar a média final"""
+        if self.start_timestamp and self.end_timestamp is None:
+            self.end_timestamp = time.time()
+            self.total_time_elapsed = self.end_timestamp - self.start_timestamp
+
+    def get_average_speed(self):
+        """Velocidade média geral baseada em todo o histórico"""
+        if self.start_timestamp is None:
+            return 0
+            
+        if self.end_timestamp:
+            duration = self.total_time_elapsed
+        else:
+            duration = time.time() - self.start_timestamp
+
+        if duration == 0:
+            return 0
+        return self.total_bytes_downloaded / duration
 
 class DownloadHistory:
     """Gerencia histórico de downloads"""
@@ -388,10 +474,10 @@ class DownloadHistory:
         self.save()
 
 class DownloadWorker(QThread):
-    progress_signal = pyqtSignal(int)
-    log_signal = pyqtSignal(str, str)  # mensagem, nível (info/warning/error/success)
+    progress_signal = pyqtSignal(object)
+    log_signal = pyqtSignal(str, str)
     finished_signal = pyqtSignal(bool, str)
-    total_size_signal = pyqtSignal(int)
+    total_size_signal = pyqtSignal(object)
     speed_signal = pyqtSignal(float)
     
     def __init__(self, url, output_path, threads, checksum=None, proxy=None, auth=None, auto_detect_quality=None, connect_timeout=None, read_timeout=None):
@@ -427,7 +513,7 @@ class DownloadWorker(QThread):
 
         # Headers HTTP
         session.headers.update({
-            "User-Agent": "PyDownloadAccelerator/3.0-Optimized",
+            "User-Agent": "PyDownloadAccelerator/1.5-Optimized",
             "Accept": "*/*",
             "Accept-Encoding": "gzip, deflate, br",  # Suporte a compressão
             "Connection": "keep-alive",
@@ -468,6 +554,18 @@ class DownloadWorker(QThread):
         session.mount("http://", adapter)
         session.mount("https://", adapter)
 
+        # Sistema de baixo nível: Otimizar buffers de socket
+        try:
+            import socket
+            # Buffer de recepção TCP de 4MB (ajuda em conexões Gigabit)
+            session.verify = True
+            adapter.poolmanager.connection_pool_kw['socket_options'] = [
+                (socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024),
+                (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            ]
+        except:
+            pass
+
         return session
         
     def stop(self):
@@ -483,9 +581,9 @@ class DownloadWorker(QThread):
         Path(path).mkdir(parents=True, exist_ok=True)
     
     def get_headers_and_length(self, url, timeout=None):
+        """Obtém informações do servidor sobre o arquivo"""
         if timeout is None:
             timeout = self.connect_timeout
-        """Obtém informações do servidor sobre o arquivo com melhor tratamento de erros"""
         accept_ranges = None
         content_length = None
         content_encoding = None
@@ -549,7 +647,7 @@ class DownloadWorker(QThread):
             optimal_threads = min(max_threads, max(32, max_threads))
             min_part_size = 256 * 1024  # 256KB mínimo
         elif file_size < 100 * 1024 * 1024:  # < 100MB
-            # Arquivos médios: MÁXIMO paralelismo (como o seu arquivo de 75MB)
+            # Arquivos médios: máximo paralelismo
             optimal_threads = min(max_threads, max(128, max_threads))
             min_part_size = 512 * 1024  # 512KB mínimo
         elif file_size < 1024 * 1024 * 1024:  # < 1GB
@@ -582,7 +680,6 @@ class DownloadWorker(QThread):
             return [url]  # Retorna a URL original se não for vídeo
 
         variations = [url]  # Sempre incluir a URL original
-        import re
 
         # Padrões comuns de qualidade em URLs
         quality_patterns = [
@@ -652,7 +749,7 @@ class DownloadWorker(QThread):
                 futures = {executor.submit(self._check_url_exists, url, timeout=2): url
                           for url in quality_urls}
 
-                for future in as_completed(futures, timeout=15):  # Timeout total de 15s
+                for future in as_completed(futures, timeout=15):
                     url = futures[future]
                     try:
                         if future.result():
@@ -702,7 +799,6 @@ class DownloadWorker(QThread):
         try:
             # Solução ultra-simples: apenas deletar a pasta inteira
             if os.path.exists(part_dir):
-                import shutil
                 shutil.rmtree(part_dir, ignore_errors=True)
                 print(f"Pasta temporária removida: {part_dir}")
 
@@ -797,7 +893,7 @@ class DownloadWorker(QThread):
             return False
 
     def download_range_worker(self, url, part_path, start, end, idx):
-        """Download de uma parte específica com retry otimizado"""
+        """Download de uma parte específica com retry"""
         attempt = 0
         headers = {"Range": f"bytes={start}-{end}"}
         last_progress_report = time.time()
@@ -806,7 +902,7 @@ class DownloadWorker(QThread):
         while attempt <= RETRY_LIMIT and not self.should_stop:
             # Pausar se solicitado
             while self.should_pause and not self.should_stop:
-                time.sleep(0.01)  # Menor intervalo para pausa mais responsiva
+                time.sleep(0.01)
 
             if self.should_stop:
                 return False
@@ -837,12 +933,21 @@ class DownloadWorker(QThread):
                     if content_length and int(content_length) != expected_part_size:
                         self.log_signal.emit(f"Parte {idx}: Tamanho esperado {expected_part_size}, servidor retornou {content_length}", "warning")
 
-                    mode = "ab" if existing > 0 else "wb"
-                    bytes_downloaded_this_attempt = 0
+                    if r.status_code == 206:
+                        mode = "ab"
+                    else:
+                        mode = "wb"
+                        if existing > 0:
+                            with self.lock:
+                                self.downloaded_bytes -= existing
+                                self.progress_signal.emit(-existing)
+                            existing = 0
 
+                    bytes_downloaded_this_attempt = 0
+                    
                     with open(part_path, mode) as f:
                         for chunk in r.iter_content(self.actual_chunk_size):
-                            # Verificação frequente de parada (a cada chunk)
+                            # Verificar se deve parar
                             if self.should_stop:
                                 return False
 
@@ -862,12 +967,12 @@ class DownloadWorker(QThread):
                                     self.downloaded_bytes += chunk_size
                                     progress_accumulator += chunk_size
 
-                                    # Emitir progresso apenas a cada 100ms para boa responsividade
-                                    now = time.time()
-                                    if now - last_progress_report >= 0.1:  # 100ms
-                                        self.progress_signal.emit(progress_accumulator)
-                                        progress_accumulator = 0
-                                        last_progress_report = now
+                            # Emitir progresso a cada 100ms
+                            now = time.time()
+                            if now - last_progress_report >= 0.1:
+                                self.progress_signal.emit(progress_accumulator)
+                                progress_accumulator = 0
+                                last_progress_report = now
 
                                 # Flush periódico para evitar perda de dados
                                 if bytes_downloaded_this_attempt % (1024 * 1024) == 0:
@@ -908,7 +1013,7 @@ class DownloadWorker(QThread):
                     # Log de retry apenas na primeira tentativa ou em erros
                     if attempt == 2:  # Só loga na segunda tentativa para não poluir
                         self.log_signal.emit(f"Parte {idx}: tentando novamente ({attempt}/{RETRY_LIMIT})", "warning")
-                    time.sleep(min(wait, 30))  # Máximo 30s de espera
+                    time.sleep(min(wait, 30))
                 else:
                     self.log_signal.emit(f"Parte {idx} falhou após {RETRY_LIMIT} tentativas: {exc}", "error")
                     return False
@@ -936,12 +1041,12 @@ class DownloadWorker(QThread):
             return False
 
         merged_size = 0
-        merge_chunk_size = min(self.actual_chunk_size * 4, 16 * 1024 * 1024)  # Até 16MB por chunk
+        # Aumentar chunk de leitura para 64MB (antes 16MB)
+        merge_chunk_size = min(self.actual_chunk_size * 8, 64 * 1024 * 1024)
 
         try:
             with open(output_path, "wb") as outf:
-                # Buffer de saída para reduzir syscalls
-                buffer_size = 64 * 1024 * 1024  # 64MB buffer
+                buffer_size = 512 * 1024 * 1024
                 outf_buffer = bytearray(buffer_size)
                 buffer_pos = 0
 
@@ -1033,7 +1138,7 @@ class DownloadWorker(QThread):
         if not part_files:
             return False
 
-        max_memory_mb = 500  # Máximo 500MB na memória
+        max_memory_mb = 500
 
         if total_size <= max_memory_mb * 1024 * 1024:
             return self._merge_in_memory(output_path, part_files, total_size)
@@ -1078,17 +1183,17 @@ class DownloadWorker(QThread):
             return False
 
     def compute_sha256(self, path):
-        """Calcula hash SHA256 do arquivo com progresso otimizado"""
+        """Calcula hash SHA256 do arquivo com indicador de progresso"""
         h = hashlib.sha256()
         file_size = os.path.getsize(path)
         processed = 0
-        chunk_size = min(self.actual_chunk_size, 4 * 1024 * 1024)  # Até 4MB por chunk
+        chunk_size = min(self.actual_chunk_size, 4 * 1024 * 1024)
         last_progress = 0
 
         try:
             with open(path, "rb") as f:
                 while True:
-                    # Verificação frequente de parada
+                    # Verificar se deve parar
                     if self.should_stop:
                         return None
 
@@ -1105,7 +1210,7 @@ class DownloadWorker(QThread):
 
                     if file_size > 0:
                         progress = int((processed / file_size) * 100)
-                        # Apenas reportar progresso a cada 5% para reduzir spam
+                        # Reportar progresso a cada 5%
                         if progress >= last_progress + 5:
                             self.log_signal.emit(f"Verificando checksum: {progress}%", "info")
                             last_progress = progress
@@ -1121,90 +1226,131 @@ class DownloadWorker(QThread):
             return None
 
     def single_stream_download(self, url, output_path):
-        """Download single-threaded otimizado com resume e compressão"""
-        headers = {}
-        existing = 0
+        """Download single-threaded com suporte a resume e retry automático"""
+        attempt = 0
         last_progress_report = time.time()
-        progress_accumulator = 0
+        
+        while attempt <= RETRY_LIMIT and not self.should_stop:
+            try:
+                headers = {}
+                existing = 0
+                progress_accumulator = 0
 
-        if os.path.exists(output_path):
-            existing = os.path.getsize(output_path)
-            if existing > 0:
-                headers["Range"] = f"bytes={existing}-"
-                self.downloaded_bytes = existing
-                self.progress_signal.emit(existing)
+                if os.path.exists(output_path):
+                    existing = os.path.getsize(output_path)
+                    if existing > 0:
+                        headers["Range"] = f"bytes={existing}-"
+                        # Nota: Em retries subsequentes, existing já estará atualizado
+                        if attempt == 0: # Apenas notificar progresso inicial na primeira tentativa
+                             self.downloaded_bytes = existing
+                             self.progress_signal.emit(existing)
 
-        try:
-            r = self.session.get(url, headers=headers, stream=True,
-                                allow_redirects=True, timeout=(self.connect_timeout, self.read_timeout))
+                r = self.session.get(url, headers=headers, stream=True,
+                                    allow_redirects=True, timeout=(self.connect_timeout, self.read_timeout))
 
-            r.raise_for_status()
+                r.raise_for_status()
 
-            total = r.headers.get("Content-Length")
-            content_encoding = r.headers.get("Content-Encoding")
+                total = r.headers.get("Content-Length")
+                content_encoding = r.headers.get("Content-Encoding")
 
-            if total is not None:
-                try:
-                    total = int(total) + existing
-                    self.total_size_signal.emit(total)
-                except Exception:
-                    pass
+                if total is not None:
+                    try:
+                        # Se for 206, content-length é o restante. Se 200, é tudo.
+                        current_total = int(total)
+                        if r.status_code == 206:
+                             final_total = current_total + existing
+                        else:
+                             final_total = current_total
+                        self.total_size_signal.emit(final_total)
+                    except Exception:
+                        pass
 
-            if content_encoding:
-                self.log_signal.emit(f"Compressão ativa: {content_encoding}", "info")
+                if content_encoding:
+                     self.log_signal.emit(f"Compressão ativa: {content_encoding}", "info")
 
-            mode = "ab" if existing and r.status_code == 206 else "wb"
-            bytes_downloaded = 0
+                if existing and r.status_code == 206:
+                    mode = "ab"
+                    self.log_signal.emit(f"Retomando download single-thread ({existing/(1024*1024):.1f} MB baixados)...", "info")
+                else:
+                    mode = "wb"
+                    if existing > 0:
+                        self.log_signal.emit("Reiniciando download (servidor não aceitou resume)...", "warning")
+                        with self.lock:
+                           self.downloaded_bytes -= existing
+                           self.progress_signal.emit(-existing)
+                        existing = 0
+                
+                bytes_downloaded_this_session = 0
 
-            with open(output_path, mode) as f:
-                for chunk in r.iter_content(self.actual_chunk_size):
-                    # Verificação frequente de parada (a cada chunk)
-                    if self.should_stop:
-                        return False
-
-                    while self.should_pause and not self.should_stop:
-                        time.sleep(0.01)
-                        # Verificação adicional durante pausa
+                with open(output_path, mode) as f:
+                    for chunk in r.iter_content(self.actual_chunk_size):
                         if self.should_stop:
                             return False
 
-                    if chunk:
-                        f.write(chunk)
-                        chunk_size = len(chunk)
-                        bytes_downloaded += chunk_size
-
-                        with self.lock:
-                            self.downloaded_bytes += chunk_size
-                            progress_accumulator += chunk_size
-
-                            # Emitir progresso apenas a cada 100ms para boa responsividade
-                            now = time.time()
-                            if now - last_progress_report >= 0.1:  # 100ms
-                                self.progress_signal.emit(progress_accumulator)
-                                progress_accumulator = 0
-                                last_progress_report = now
-
-                        # Flush periódico para arquivos grandes
-                        if bytes_downloaded % (10 * 1024 * 1024) == 0:  # A cada 10MB
-                            f.flush()
-                            os.fsync(f.fileno())
-
-                            # Verificação adicional após flush
+                        while self.should_pause and not self.should_stop:
+                            time.sleep(0.01)
                             if self.should_stop:
                                 return False
 
-            # Emitir qualquer progresso restante acumulado
-            if progress_accumulator > 0:
-                with self.lock:
-                    self.progress_signal.emit(progress_accumulator)
+                        if chunk:
+                            f.write(chunk)
+                            chunk_size = len(chunk)
+                            bytes_downloaded_this_session += chunk_size
 
-            return True
+                            with self.lock:
+                                self.downloaded_bytes += chunk_size
+                                progress_accumulator += chunk_size
 
-        except Exception as e:
-            self.log_signal.emit(f"Erro no download single-thread: {e}", "error")
-            return False
+                                now = time.time()
+                                if now - last_progress_report >= 0.1:
+                                    self.progress_signal.emit(progress_accumulator)
+                                    progress_accumulator = 0
+                                    last_progress_report = now
+
+                            if bytes_downloaded_this_session % (10 * 1024 * 1024) == 0:
+                                f.flush()
+                                os.fsync(f.fileno())
+                                if self.should_stop:
+                                    return False
+
+                # Emitir qualquer progresso restante
+                if progress_accumulator > 0:
+                    with self.lock:
+                        self.progress_signal.emit(progress_accumulator)
+
+                return True # Sucesso completo
+
+            except Exception as e:
+                attempt += 1
+                if self.should_stop:
+                    return False
+                
+                if attempt <= RETRY_LIMIT:
+                    wait = RETRY_BACKOFF ** attempt
+                    self.log_signal.emit(f"Erro no download (tentativa {attempt}/{RETRY_LIMIT}): {e}. Aguardando {wait}s...", "warning")
+                    time.sleep(wait)
+                else:
+                    self.log_signal.emit(f"Falha definitiva no download single-thread após {RETRY_LIMIT} tentativas: {e}", "error")
+                    return False
+        
+        return False
 
     def run(self):
+        # Sistema de Prioridade: Definir prioridade ALTA no Windows
+        try:
+            if sys.platform == 'win32':
+                import kernel32
+                # HIGH_PRIORITY_CLASS = 0x00000080
+                handle = kernel32.GetCurrentProcess()
+                kernel32.SetPriorityClass(handle, 0x00000080)
+        except:
+            try:
+                # Alternativa via subprocess se kernel32 não estiver direto
+                if sys.platform == 'win32':
+                    os.system(f'wmic process where processid={os.getpid()} CALL setpriority "high priority"')
+            except:
+                pass
+
         self.start_time = time.time()
         part_dir = None
 
@@ -1237,6 +1383,9 @@ class DownloadWorker(QThread):
             if total_len is None or accept_ranges != "bytes":
                 self.log_signal.emit("Download single-thread (servidor não suporta ranges)", "warning")
                 success = self.single_stream_download(self.url, self.output_path)
+                if not success:
+                    self.finished_signal.emit(False, "Falha no download single-thread")
+                    return
             elif total_len <= 0:
                 self.log_signal.emit(f"Tamanho inválido do arquivo: {total_len}", "error")
                 self.finished_signal.emit(False, f"Tamanho inválido do arquivo: {total_len}")
@@ -1244,6 +1393,9 @@ class DownloadWorker(QThread):
             elif total_len < 1024 * 1024:  # Arquivos menores que 1MB
                 self.log_signal.emit("Arquivo pequeno, usando download single-thread", "info")
                 success = self.single_stream_download(self.url, self.output_path)
+                if not success:
+                    self.finished_signal.emit(False, "Falha no download single-thread")
+                    return
             else:
                 # Download multi-thread com algoritmo de divisão inteligente
                 self.total_size_signal.emit(total_len)
@@ -1297,7 +1449,7 @@ class DownloadWorker(QThread):
 
                     try:
                         for future in as_completed(futures):
-                            # Verificar parada frequente
+                            # Verificar se deve parar
                             if self.should_stop:
                                 break
 
@@ -1311,7 +1463,7 @@ class DownloadWorker(QThread):
                             # Log de progresso agrupado a cada 10% ou no início
                             current_progress_pct = int((completed / len(parts)) * 100)
                             if current_progress_pct >= last_progress_log + 10 or completed == 1:
-                                self.log_signal.emit(f"Progresso: {completed}/{len(parts)} partes ({current_progress_pct}%)", "info")
+                                self.log_signal.emit(f"Partes concluídas: {completed}/{len(parts)} ({current_progress_pct}%)", "info")
                                 last_progress_log = current_progress_pct
 
                     except Exception as e:
@@ -1386,13 +1538,16 @@ class DownloadWorker(QThread):
                 if incorrect_parts:
                     self.log_signal.emit(f"Partes com tamanho incorreto: {len(incorrect_parts)} partes", "warning")
                     # Para arquivos não-vídeo, podemos tentar continuar se o total estiver próximo
-                    if not self._is_video_url(self.url) and abs(total_downloaded_size - total_len) < 1024:  # Tolerância de 1KB
+                    if not self._is_video_url(self.url) and abs(total_downloaded_size - total_len) < 1024:
                         self.log_signal.emit("Continuando apesar de tamanhos incorretos (tolerância para não-vídeos)", "warning")
                     else:
                         self.finished_signal.emit(False, f"Partes com tamanho incorreto: {len(incorrect_parts)} partes")
                         return
 
                 self.log_signal.emit(f"Todas as partes verificadas. Tamanho total: {total_downloaded_size/(1024*1024):.1f} MB", "info")
+                
+                # Parar cálculo de velocidade para não cair a média
+                self.speed_calc.stop_tracking()
 
                 # Unir partes
                 self.log_signal.emit("Download das partes completo! Iniciando união...", "success")
@@ -1404,7 +1559,7 @@ class DownloadWorker(QThread):
 
                 # Escolher método de merge baseado nas configurações
                 turbo_merge = getattr(self, 'turbo_merge_enabled', True)  # Default True
-                max_memory_mb = getattr(self, 'max_memory_mb', 300)  # Default 300MB
+                max_memory_mb = getattr(self, 'max_memory_mb', 300)
 
                 if turbo_merge and total_file_size <= max_memory_mb * 1024 * 1024:
                     merge_success = self.merge_parts_parallel(tmp_out, len(parts), part_dir)
@@ -1422,7 +1577,7 @@ class DownloadWorker(QThread):
                         self.log_signal.emit("Arquivo final tem 0 bytes!", "error")
                         self.finished_signal.emit(False, "Arquivo final está vazio")
                         return
-                    elif total_len and abs(final_size - total_len) > 1024:  # Mais de 1KB de diferença
+                    elif total_len and abs(final_size - total_len) > 1024:
                         self.log_signal.emit(f"Tamanho final incorreto: {final_size} bytes (esperado {total_len} bytes)", "warning")
 
                 os.replace(tmp_out, self.output_path)
@@ -1499,7 +1654,7 @@ class AboutDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         
         # Título
-        title_label = QLabel("Acelerador de Downloads v3.0")
+        title_label = QLabel("Acelerador de Downloads v1.5")
         title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #e0e0e0; padding: 10px;")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)
@@ -1744,7 +1899,6 @@ class AdvancedSettingsDialog(QDialog):
             self.checksum_status.setStyleSheet("font-size: 10px; color: #666666;")
             return
 
-        import re
         # SHA256 deve ter exatamente 64 caracteres hexadecimais
         if re.match(r'^[a-fA-F0-9]{64}$', text):
             self.checksum_status.setText("✓ Válido")
@@ -1849,26 +2003,24 @@ class SpeedChartWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-
-        # Configurar matplotlib para tema dark
+        
         plt.style.use('dark_background')
-
-        # Criar figura matplotlib com tamanho otimizado
+        
         self.figure = Figure(figsize=(8, 3), dpi=100, facecolor='#1a1a1a')
         self.canvas = FigureCanvas(self.figure)
-
-        # Configurar layout
+        
         layout = QVBoxLayout(self)
         layout.addWidget(self.canvas)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        # Dados do gráfico
+        
         self.time_data = []
         self.speed_data = []
-        self.max_points = 1000  # Máximo de pontos aumentado para capturar todo o download
-        self.chart_peak_speed = 0  # Pico calculado pelo gráfico
-
-        # Configurar gráfico inicial
+        self.max_points = 1000
+        self.chart_peak_speed = 0
+        
+        self.last_chart_update = time.time()
+        self.chart_update_min_interval = 0.2  # 200ms mínimo
+        
         self.setup_chart()
 
         # O gráfico será atualizado junto com a interface principal
@@ -1905,7 +2057,7 @@ class SpeedChartWidget(QWidget):
         self.fill = self.ax.fill_between([], [], [], color='#4a9eff', alpha=0.1)
 
         # Configurar limites iniciais
-        self.ax.set_xlim(0, 60)  # 60 segundos inicial
+        self.ax.set_xlim(0, 60)
         self.ax.set_ylim(0, 10)  # 10 MB/s inicial
 
         # Forçar atualização do canvas
@@ -1938,7 +2090,12 @@ class SpeedChartWidget(QWidget):
         """Atualiza a visualização do gráfico"""
         if not self.time_data:
             return
-
+        
+        now = time.time()
+        if now - self.last_chart_update < self.chart_update_min_interval:
+            return  # Pular atualização se muito recente
+        self.last_chart_update = now
+        
         # Atualizar dados da linha
         self.line.set_data(self.time_data, self.speed_data)
 
@@ -1959,7 +2116,7 @@ class SpeedChartWidget(QWidget):
             if max_speed > 0:
                 # Ajustar limite Y para ser um pouco maior que o máximo
                 y_limit = max_speed * 1.2
-                # Mínimo de 10 MB/s para boa visualização
+                # Mínimo de 10 MB/s para visualização
                 y_limit = max(y_limit, 10)
                 self.ax.set_ylim(0, y_limit)
 
@@ -1977,7 +2134,7 @@ class SpeedChartWidget(QWidget):
         time_range = time_max - time_min
 
         # Adicionar margem de 10% no início e fim
-        margin = max(time_range * 0.1, 5)  # Mínimo de 5 segundos de margem
+        margin = max(time_range * 0.1, 5)
         self.ax.set_xlim(time_min - margin, time_max + margin)
 
         # Ajustar limite Y baseado nos dados históricos
@@ -1985,7 +2142,7 @@ class SpeedChartWidget(QWidget):
             speed_max = max(self.speed_data)
             speed_min = min(self.speed_data)
 
-            # Adicionar margem superior de 20%, mínimo de 10 MB/s para boa visualização
+            # Adicionar margem superior de 20%
             y_max = max(speed_max * 1.2, 10)
             y_min = max(0, speed_min * 0.9)  # Não permitir valores negativos
 
@@ -2022,23 +2179,18 @@ class SpeedChartWidget(QWidget):
         """Retorna a velocidade de pico registrada no gráfico"""
         return self.chart_peak_speed
 
-    def start_chart_updates(self):
-        """Inicia as atualizações do gráfico (deprecated - agora usa timer principal)"""
-        pass
 
-    def stop_chart_updates(self):
-        """Para as atualizações do gráfico (deprecated - agora usa timer principal)"""
-        pass
 
     def reset_chart(self):
         """Reinicia o gráfico para novo download"""
         self.time_data.clear()
         self.speed_data.clear()
-        self.chart_peak_speed = 0  # Resetar pico do gráfico
+        self.chart_peak_speed = 0
         if hasattr(self, 'start_time'):
             delattr(self, 'start_time')
-
-        # Limpar gráfico
+        
+        self.last_chart_update = time.time()
+        
         self.line.set_data([], [])
         self.fill.remove()
         self.fill = self.ax.fill_between([], [], [], color='#4a9eff', alpha=0.1)
@@ -2049,13 +2201,7 @@ class SpeedChartWidget(QWidget):
 
         self.canvas.draw()
 
-    def start_chart_updates(self):
-        """Inicia as atualizações do gráfico"""
-        self.update_timer.start(self.chart_update_interval)
 
-    def stop_chart_updates(self):
-        """Para as atualizações do gráfico"""
-        self.update_timer.stop()
 
 
 class DownloaderGUI(QMainWindow):
@@ -2079,7 +2225,7 @@ class DownloaderGUI(QMainWindow):
         }
 
         # Inicializar updater
-        self.current_version = "1.2"  # Versão atual do programa
+        self.current_version = "1.5"  # Versão atual do programa
         self.updater = Updater(self.current_version)
 
         self.init_ui()
@@ -2330,22 +2476,12 @@ class DownloaderGUI(QMainWindow):
 
     def _get_icon(self):
         """Obtém o ícone de forma compatível com PyInstaller"""
-        # Lista de possíveis locais do ícone
-        possible_paths = [
-            "ico.ico",  # Diretório atual (desenvolvimento)
-            os.path.join(os.path.dirname(sys.executable), "ico.ico"),  # Mesmo diretório do exe
-        ]
-
-        # Quando executado via PyInstaller, procurar no diretório temporário
-        if hasattr(sys, '_MEIPASS'):
-            possible_paths.append(os.path.join(sys._MEIPASS, "ico.ico"))
-
-        for icon_path in possible_paths:
-            if os.path.exists(icon_path):
-                return QIcon(icon_path)
-
-        # Fallback: retornar ícone vazio se não encontrar
-        return QIcon()
+        try:
+            icon_path = get_resource_path("ico.ico")
+            return QIcon(icon_path)
+        except Exception:
+            # Fallback: retornar ícone vazio se não encontrar
+            return QIcon()
 
     def closeEvent(self, event):
         """Salva estado ao fechar a janela"""
@@ -2557,11 +2693,22 @@ class DownloaderGUI(QMainWindow):
             version_info = result.get("version_info")
 
             if version_info:
+                # Construir mensagem com changelog se disponível
+                message = f"Uma nova versão ({version_info['version']}) está disponível.\n\n"
+
+                # Adicionar changelog se existir
+                if 'changelog' in version_info and version_info['changelog']:
+                    message += "📋 Novidades desta versão:\n"
+                    for item in version_info['changelog']:
+                        message += f"• {item}\n"
+                    message += "\n"
+
+                message += "Deseja baixar e instalar agora?"
+
                 reply = QMessageBox.question(
                     self,
                     "Atualização Disponível",
-                    f"Uma nova versão ({version_info['version']}) está disponível.\n\n"
-                    f"Deseja baixar e instalar agora?",
+                    message,
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.Yes
                 )
@@ -2569,16 +2716,12 @@ class DownloaderGUI(QMainWindow):
                 if reply == QMessageBox.StandardButton.Yes:
                     self.download_update(version_info["download_url"])
             else:
-                QMessageBox.information(
-                    self,
-                    "Verificação de Atualização",
-                    "Você está usando a versão mais recente do programa.",
-                    QMessageBox.StandardButton.Ok
-                )
+                # Apenas registrar no log de status, sem popup irritante
+                self.add_log("Programa está atualizado", "info")
 
         # Mostrar diálogo de progresso durante a verificação
         progress = QProgressDialog("Verificando atualizações...", "Cancelar", 0, 0, self)
-        progress.setWindowModality(2)  # ApplicationModal
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         progress.setAutoClose(True)
         progress.setAutoReset(True)
         progress.show()
@@ -2637,7 +2780,7 @@ class DownloaderGUI(QMainWindow):
 
         # Mostrar diálogo de progresso durante o download
         progress = QProgressDialog("Preparando atualização...", "Cancelar", 0, 0, self)
-        progress.setWindowModality(2)  # ApplicationModal
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         progress.setAutoClose(True)
         progress.setAutoReset(True)
         progress.show()
@@ -2778,10 +2921,11 @@ class DownloaderGUI(QMainWindow):
             
     def update_progress(self, bytes_downloaded):
         self.downloaded_bytes += bytes_downloaded
-        self.speed_calc.add_sample(self.downloaded_bytes)
         
     def update_speed_display(self):
         if self.download_worker and self.download_worker.isRunning():
+            self.speed_calc.add_sample(self.downloaded_bytes)
+            
             current_speed = self.speed_calc.get_speed()
             avg_speed = self.speed_calc.get_average_speed()
             peak_speed = self.speed_calc.get_peak_speed()
@@ -2840,7 +2984,7 @@ class DownloaderGUI(QMainWindow):
         }
         emoji = emoji_map.get(level, "")
         
-        # Cores mais legíveis e contrastadas
+        # Definir cores para diferentes tipos de mensagem
         colors = {
             "info": "#a8c5e8",
             "warning": "#e8c5a8",
@@ -3013,4 +3157,5 @@ def main():
     sys.exit(app.exec())
 
 if __name__ == "__main__":
+    cleanup_old_temp_dirs()  # Função de limpeza de pasta temporaria MEI na inicialização
     main()

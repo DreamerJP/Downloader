@@ -1,13 +1,9 @@
 {
-    "version": "1.4",
-    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v1.4/Downloader.exe",
+    "version": "1.5",
+    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v1.5/Downloader.exe",
     "changelog": [
-        "Nova versão com melhorias significativas",
+        "Aumento de buffer para arquivos maiores, otimizando a junção de arquivos",
         "Correções de bugs e otimizações",
-        "Nova funcionalidade de atualização automática"
+        "Correção de exibição de progresso"
     ]
 }
-
-
-
-
