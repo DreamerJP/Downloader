@@ -2057,7 +2057,7 @@ class AboutDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         
         # Título
-        title_label = QLabel("Acelerador de Downloads v1.5")
+        title_label = QLabel("Acelerador de Downloads v1.6")
         title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #e0e0e0; padding: 10px;")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)
@@ -2085,80 +2085,89 @@ class AboutDialog(QDialog):
         # Conteúdo HTML formatado
         content = """
         <h3 style="color: #8a9ba8; margin-top: 0;">⚡ CAPACIDADES PRINCIPAIS</h3>
-        
+
         <p><b>🔄 Download Paralelo Inteligente</b><br>
         • Até 512 conexões simultâneas por arquivo<br>
-        • Divisão automática em partes otimizadas (0.1-4MB)<br>
+        • Divisão automática em partes otimizadas (256KB–32MB)<br>
         • Balanceamento inteligente de carga entre threads<br>
         • <span style="color: #7a9a7a;">Resultado: Até 23x mais velocidade</span></p>
-        
+
         <p><b>🚀 Merge Turbo (Tecnologia de Memória)</b><br>
-        • Carregamento em RAM para arquivos até 300MB<br>
+        • Carregamento em RAM para arquivos até ~300MB<br>
         • União instantânea sem operações de disco<br>
         • Buffers de 64MB para I/O otimizado<br>
         • <span style="color: #7a9a7a;">Resultado: Eliminação do tempo de união</span></p>
-        
+
+        <p><b>🎬 Suporte Completo a Streams HLS/M3U8</b><br>
+        • Parser de Master Playlist com seleção automática da melhor resolução<br>
+        • Download paralelo de segmentos .ts com montagem sequencial automática<br>
+        • Suporte a criptografia AES-128 — descriptografia automática por segmento<br>
+        • <span style="color: #7a9a7a;">Resultado: Download de vídeos protegidos e segmentados</span></p>
+
         <p><b>🔍 Detecção Automática de Qualidade</b><br>
         • Verificação inteligente de resoluções disponíveis<br>
         • Suporte completo: 360p, 480p, 720p, 1080p, 1440p, 2160p, 4K<br>
         • Cache automático (5 minutos) para evitar re-verificações<br>
         • <span style="color: #7a9a7a;">Resultado: Sempre baixa a melhor qualidade</span></p>
-        
+
         <p><b>🛠️ Otimizações de Rede Avançadas</b><br>
-        • TCP_NODELAY - Eliminação de delays desnecessários<br>
-        • Connection Pooling - Reutilização inteligente de conexões<br>
-        • Timeouts agressivos - Resposta mais rápida do servidor<br>
-        • Retry exponencial - Recuperação automática de falhas</p>
-        
+        • Headers HTTP customizados por download (User-Agent, Referer, Cookie etc.)<br>
+        • TCP_NODELAY — eliminação de delays desnecessários<br>
+        • Connection Pooling — reutilização inteligente de conexões<br>
+        • Retry exponencial — recuperação automática de falhas</p>
+
         <h3 style="color: #8a9ba8; margin-top: 20px;">📊 TECNOLOGIAS DE ACELERAÇÃO</h3>
-        
+
         <p><b>Multi-threading Otimizado</b><br>
-        • ThreadPoolExecutor com até 1024 workers<br>
-        • Gerenciamento automático de recursos do sistema<br>
+        • ThreadPoolExecutor com até 512 workers por download<br>
+        • Workers HLS limitados a 256 para estabilidade em streams<br>
         • Sincronização eficiente com locks otimizados</p>
-        
+
         <p><b>Sistema de Buffers Inteligente</b><br>
-        • Chunks dinâmicos: 256KB até 8MB baseado no arquivo<br>
-        • Buffers adaptativos: 32MB até 256MB<br>
-        • Memory-mapped files para arquivos grandes<br>
+        • Chunks dinâmicos: 256KB a 32MB dependendo do arquivo<br>
+        • Otimização X3D: chunks de 32MB para CPUs com cache L3 3D (AMD X3D)<br>
         • Flush estratégico apenas quando necessário</p>
-        
+
         <p><b>Cache Inteligente</b><br>
         • Memorização de verificações de qualidade<br>
         • Expiração automática após 5 minutos<br>
         • Thread-safe e eficiente</p>
-        
+
         <h3 style="color: #8a9ba8; margin-top: 20px;">🎯 RECURSOS AVANÇADOS</h3>
-        
+
+        <p><b>🧩 Extensão do Chrome Integrada</b><br>
+        • Captura links de vídeo (M3U8, MP4, TS, MPD) enquanto você navega<br>
+        • Instalação com um clique via registro do Windows (sem Chrome Web Store)<br>
+        • Gerenciada diretamente pela aba "Extensão Chrome" neste app<br>
+        • <span style="color: #7a9a7a;">Resultado: Fluxo completo browser → downloader sem copiar links</span></p>
+
         <p><b>Interface Moderna</b><br>
-        • Monitoramento em tempo real de velocidade e progresso<br>
-        • Métricas detalhadas: Atual, média, velocidade de pico<br>
-        • Histórico completo de todos os downloads<br>
+        • Monitoramento em tempo real de velocidade, progresso e ETA<br>
+        • Métricas detalhadas: velocidade atual, média e pico<br>
+        • Histórico completo de todos os downloads com exportação JSON<br>
         • Controles intuitivos de pause/resume/stop</p>
-        
+
         <p><b>Configurações Técnicas</b><br>
-        • Modo TURBO experimental para velocidade máxima<br>
-        • Buffers personalizáveis para diferentes cenários<br>
-        • Timeouts ajustáveis para redes específicas<br>
-        • Suporte completo a proxy e autenticação</p>
-        
+        • Headers HTTP personalizados por sessão de download<br>
+        • Buffers e timeouts ajustáveis para redes específicas<br>
+        • Suporte completo a proxy HTTP/HTTPS e autenticação</p>
+
         <p><b>Verificação de Integridade</b><br>
-        • Checksum SHA256 automático<br>
-        • Validação de integridade pós-download<br>
+        • Checksum SHA-256 automático pós-download<br>
         • Detecção de arquivos corrompidos</p>
-        
+
         <h3 style="color: #8a9ba8; margin-top: 20px;">🏆 DIFERENCIAIS TÉCNICOS</h3>
-        
+
         <p><b>Vs Navegadores Convencionais</b><br>
         • 512 vs 1 conexão simultânea<br>
-        • Chunks otimizados vs downloads lineares<br>
-        • Merge inteligente vs operações sequenciais<br>
-        • Cache automático vs re-verificações constantes</p>
-        
+        • Suporte nativo a HLS/M3U8 e AES-128<br>
+        • Merge inteligente vs downloads lineares e lentos</p>
+
         <p><b>Vs Outros Aceleradores</b><br>
-        • Detecção de qualidade automática (único)<br>
-        • Merge em memória para velocidade máxima<br>
-        • Buffers adaptativos baseados no arquivo</p>
+        • Extensão Chrome integrada para captura automática<br>
+        • Detecção de qualidade automática (360p → 4K)<br>
+        • Suporte a streams criptografados AES-128<br>
+        • Merge em memória para velocidade máxima</p>
         """
         
         scroll.setHtml(content)
