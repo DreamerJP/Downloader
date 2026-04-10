@@ -1868,14 +1868,14 @@ class DownloadWorker(QThread):
 
 class ChromeExtensionInstaller:
     """
-    Gerencia instalação e desinstalação da extensão Chrome via registro do Windows.
-    Usa a política HKCU\\SOFTWARE\\Google\\Chrome\\Extensions para registrar
-    extensões locais (unpacked) sem necessidade de publicação na Chrome Web Store.
+    Gerencia instalação da extensão Chrome.
+    Copia os arquivos para %APPDATA% e guia o usuário a carregar
+    a extensão desempacotada via chrome://extensions (modo desenvolvedor).
+    Este é o único método suportado pelo Chrome para extensões locais
+    em máquinas Windows sem domínio corporativo.
     """
 
-    # ID estável derivado do nome — pode depois ser substituído pelo ID real gerado pelo Chrome
     EXT_DEST_RELATIVE = os.path.join("DreamerJP", "ChromeExtension")
-    REG_BASE = r"SOFTWARE\Google\Chrome\Extensions"
 
     def __init__(self, log_callback=None):
         """
@@ -1909,34 +1909,15 @@ class ChromeExtensionInstaller:
         except Exception:
             return "1.0"
 
-    def _get_extension_id(self):
-        """
-        Deriva um ID de extensão Chrome compatível (32 chars a-p) a partir
-        do caminho de instalação, similar ao que o Chrome faz internamente.
-        """
-        import hashlib
-        path_hash = hashlib.sha256(self.ext_dest.lower().encode()).hexdigest()[:32]
-        # Chrome extension IDs usam a-p (não hex normal)
-        ext_id = "".join(chr(ord('a') + int(c, 16)) for c in path_hash)
-        return ext_id
 
     def is_available(self):
         """Verifica se os arquivos da extensão estão disponíveis para instalar."""
         return self.ext_src is not None and os.path.isdir(self.ext_src)
 
     def is_installed(self):
-        """Verifica se a extensão está registrada no Windows."""
-        if not winreg:
-            return False
-        try:
-            ext_id = self._get_extension_id()
-            reg_path = f"{self.REG_BASE}\\{ext_id}"
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path):
-                return True
-        except FileNotFoundError:
-            return False
-        except Exception:
-            return False
+        """Verifica se os arquivos da extensão foram copiados para o diretório de destino."""
+        manifest_dest = os.path.join(self.ext_dest, "manifest.json")
+        return os.path.isfile(manifest_dest)
 
     def get_chrome_paths(self):
         """Retorna lista de possíveis executáveis do Chrome encontrados no sistema."""
@@ -1953,95 +1934,73 @@ class ChromeExtensionInstaller:
 
     def install(self):
         """
-        Copia os ficheiros da extensão e regista no Windows.
+        Copia os arquivos da extensão para %APPDATA%\DreamerJP\ChromeExtension.
+
+        NOTA: O Chrome bloqueou instalação automática via registro para extensões
+        locais em máquinas não-domínio. O método correto é:
+          1. Copiar os arquivos (feito aqui)
+          2. Abrir chrome://extensions, ativar 'Modo do desenvolvedor'
+          3. Clicar 'Carregar sem compactação' e selecionar a pasta
 
         Retorna:
-            (bool, str): (sucesso, mensagem)
+            (bool, str): (sucesso, caminho_destino) ou (False, mensagem_erro)
         """
-        if not winreg:
-            return False, "winreg não disponível (não é Windows)."
-
         if not self.is_available():
-            return False, "Pasta ChromeExtension não encontrada. Reinstale o aplicativo."
+            return False, (
+                "Arquivos da extensão não encontrados no pacote.\n\n"
+                "Reconstrua o executável com:\n"
+                "  pyinstaller Downloader.spec\n\n"
+                "(A pasta ChromeExtension será incluída automaticamente.)"
+            )
 
         if not self.is_chrome_installed():
             return False, "Google Chrome não encontrado. Instale o Chrome primeiro."
 
         try:
-            # 1. Copiar arquivos para destino permanente
+            # Copiar arquivos para destino permanente no %APPDATA%
             self.log(f"Copiando extensão para: {self.ext_dest}", "info")
             os.makedirs(self.ext_dest, exist_ok=True)
+            copied = 0
             for fname in os.listdir(self.ext_src):
                 src_file = os.path.join(self.ext_src, fname)
                 dst_file = os.path.join(self.ext_dest, fname)
                 if os.path.isfile(src_file):
                     shutil.copy2(src_file, dst_file)
-            self.log("Arquivos copiados com sucesso.", "info")
-
-            # 2. Registrar no Windows
-            ext_id = self._get_extension_id()
-            version = self._read_manifest_version()
-            manifest_path = os.path.join(self.ext_dest, "manifest.json")
-            reg_path = f"{self.REG_BASE}\\{ext_id}"
-
-            self.log(f"Registrando extensão (ID: {ext_id[:12]}...)", "info")
-
-            key = winreg.CreateKeyEx(
-                winreg.HKEY_CURRENT_USER,
-                reg_path,
-                0,
-                winreg.KEY_SET_VALUE
-            )
-            winreg.SetValueEx(key, "path",    0, winreg.REG_SZ, manifest_path)
-            winreg.SetValueEx(key, "version", 0, winreg.REG_SZ, version)
-            winreg.CloseKey(key)
-
-            self.log("Registro criado com sucesso.", "info")
-            return True, (
-                f"Extensão instalada com sucesso!\n"
-                f"Reinicie o Chrome para ativá-la.\n"
-                f"Destino: {self.ext_dest}"
-            )
+                    copied += 1
+            self.log(f"{copied} arquivo(s) copiado(s) com sucesso.", "success")
+            return True, self.ext_dest  # Retorna o caminho para exibir ao usuário
 
         except PermissionError:
-            return False, "Permissão negada ao acessar o registro. Tente executar como administrador."
+            return False, f"Permissão negada ao copiar para:\n{self.ext_dest}"
         except Exception as e:
             return False, f"Erro durante a instalação: {e}"
 
     def uninstall(self):
         """
-        Remove o registro e os arquivos da extensão.
+        Remove os arquivos da extensão do diretório de destino.
 
         Retorna:
             (bool, str): (sucesso, mensagem)
         """
-        if not winreg:
-            return False, "winreg não disponível."
-
         errors = []
 
-        # 1. Remover chave do registro
-        try:
-            ext_id = self._get_extension_id()
-            reg_path = f"{self.REG_BASE}\\{ext_id}"
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, reg_path)
-            self.log("Registro removido.", "info")
-        except FileNotFoundError:
-            self.log("Registro não encontrado (já removido?).", "warning")
-        except Exception as e:
-            errors.append(f"Erro no registro: {e}")
-
-        # 2. Remover arquivos
         try:
             if os.path.isdir(self.ext_dest):
                 shutil.rmtree(self.ext_dest, ignore_errors=True)
                 self.log("Arquivos removidos.", "info")
+            else:
+                self.log("Pasta de destino não existe (já removida?).", "warning")
         except Exception as e:
             errors.append(f"Erro ao remover arquivos: {e}")
 
         if errors:
             return False, "Desinstalação parcial:\n" + "\n".join(errors)
-        return True, "Extensão desinstalada. Reinicie o Chrome para que a remoção seja aplicada."
+        return True, (
+            "Arquivos da extensão removidos com sucesso.\n\n"
+            "Para desativar no Chrome:\n"
+            "1. Abra chrome://extensions\n"
+            "2. Remova a extensão 'DreamerJP Advanced Interceptor'."
+        )
 
 
 class AboutDialog(QDialog):
@@ -2910,7 +2869,7 @@ class DownloaderGUI(QMainWindow):
         # --- Botões ---
         btn_layout = QHBoxLayout()
 
-        self._ext_install_btn = QPushButton("⬇  Instalar Extensão")
+        self._ext_install_btn = QPushButton("⬇  Copiar Arquivos da Extensão")
         self._ext_install_btn.setMinimumHeight(38)
         self._ext_install_btn.setStyleSheet(
             "QPushButton { background-color: #2a5a2a; border-color: #3a7a3a; "
@@ -2957,17 +2916,21 @@ class DownloaderGUI(QMainWindow):
         outer.addWidget(log_group)
 
         # --- Instruções ---
-        guide_group = QGroupBox("Como usar após instalar")
+        guide_group = QGroupBox("Como instalar e usar a extensão")
         guide_layout = QVBoxLayout(guide_group)
         guide_lbl = QLabel(
-            "<ol style='margin:0; padding-left:18px; line-height:1.8;'>"
-            "<li>Clique em <b>Instalar Extensão</b> acima.</li>"
-            "<li>Reinicie o Google Chrome completamente (feche e reabra).</li>"
-            "<li>Acesse <b>chrome://extensions</b> → confirme a extensão na lista.</li>"
-            "<li>Navegue normalmente — quando um vídeo começar a tocar, a extensão "
-            "captura o link e o envia automaticamente ao Downloader.</li>"
-            "<li>Verifique a aba <b>Download</b> — a URL aparecerá pronta para baixar.</li>"
+            "<ol style='margin:0; padding-left:18px; line-height:1.9;'>"
+            "<li>Clique em <b>⬇ Copiar Arquivos</b> acima — os arquivos serão copiados para o AppData.</li>"
+            "<li>O Chrome abrirá automaticamente em <b>chrome://extensions</b>.</li>"
+            "<li>Ative o <b>Modo do desenvolvedor</b> (toggle no canto superior direito da página).</li>"
+            "<li>Clique em <b>Carregar sem compactação</b> (<i>Load Unpacked</i>).</li>"
+            "<li>Cole o caminho copiado (Ctrl+V) ou navegue até a pasta e confirme.</li>"
+            "<li>A extensão aparecerá na lista — pronta para uso! 🎉</li>"
             "</ol>"
+            "<p style='margin-top:10px; color:#7a9a7a; font-size:10px;'>"
+            "⚠️ O Chrome bloqueia instalação automática de extensões locais por segurança. "
+            "O método 'Carregar sem compactação' é o único suportado para extensões não publicadas na Store."
+            "</p>"
         )
         guide_lbl.setWordWrap(True)
         guide_lbl.setStyleSheet("font-size: 11px; color: #a8b8c8; padding: 4px;")
@@ -3010,13 +2973,13 @@ class DownloaderGUI(QMainWindow):
             self._ext_src_status.setText("🔴  Arquivos da extensão não encontrados. Reinstale o aplicativo.")
             self._ext_src_status.setStyleSheet("font-size: 11px; color: #e88070;")
 
-        # Extensão registrada no Windows?
+        # Extensão pronta no AppData?
         if inst.is_installed():
-            self._ext_install_status.setText("🟢  Extensão registrada no Windows (registro OK).")
+            self._ext_install_status.setText("🟢  Arquivos prontos no AppData (pronta para carregar).")
             self._ext_install_status.setStyleSheet("font-size: 11px; color: #80e890;")
-            self._ext_dest_label.setText(f"📂 Instalada em: {inst.ext_dest}")
+            self._ext_dest_label.setText(f"📂 Pasta: {inst.ext_dest}")
         else:
-            self._ext_install_status.setText("⚪  Extensão não instalada.")
+            self._ext_install_status.setText("⚪  Arquivos ainda não copiados.")
             self._ext_install_status.setStyleSheet("font-size: 11px; color: #909090;")
             self._ext_dest_label.setText("")
 
@@ -3027,16 +2990,43 @@ class DownloaderGUI(QMainWindow):
         self._ext_open_chrome_btn.setEnabled(inst.is_chrome_installed())
 
     def _ext_do_install(self):
-        """Executa a instalação da extensão e atualiza a UI."""
-        self._ext_log("Iniciando instalação...", "info")
+        """Copia os arquivos da extensão e guia o usuário a carregá-la no Chrome."""
+        self._ext_log("Copiando arquivos da extensão...", "info")
         self._ext_install_btn.setEnabled(False)
-        success, msg = self._ext_installer.install()
-        if success:
-            self._ext_log(msg, "success")
-            QMessageBox.information(self, "Extensão Chrome", msg)
-        else:
-            self._ext_log(msg, "error")
-            QMessageBox.critical(self, "Erro na Instalação", msg)
+        success, result = self._ext_installer.install()
+        if not success:
+            self._ext_log(result, "error")
+            QMessageBox.critical(self, "Erro na Instalação", result)
+            self._ext_refresh_status()
+            return
+
+        ext_path = result  # caminho destino
+        self._ext_log(f"Arquivos copiados para: {ext_path}", "success")
+
+        # Copiar caminho para o clipboard
+        try:
+            from PyQt6.QtWidgets import QApplication as _App
+            _App.clipboard().setText(ext_path)
+            self._ext_log("Caminho copiado para o área de transferência.", "info")
+        except Exception:
+            pass
+
+        # Mostrar diálogo guiado
+        guide_msg = (
+            f"✅ Arquivos copiados para:\n"
+            f"{ext_path}\n\n"
+            f"📋 O caminho foi copiado para a área de transferência.\n\n"
+            f"Agora siga os passos abaixo no Chrome:\n"
+            f"1️⃣  Clique em OK — o Chrome abrirá em chrome://extensions\n"
+            f"2️⃣  Ative o 'Modo do desenvolvedor' (toggle no canto superior direito)\n"
+            f"3️⃣  Clique em 'Carregar sem compactação' (Load Unpacked)\n"
+            f"4️⃣  Cole o caminho (Ctrl+V) ou navegue até a pasta e confirme\n\n"
+            f"🔄 Para desabilitar a extensão no futuro, volte em chrome://extensions."
+        )
+        QMessageBox.information(self, "🧩 Extensão Pronta — Siga os Passos", guide_msg)
+
+        # Abrir Chrome em chrome://extensions
+        self._ext_open_chrome_extensions()
         self._ext_refresh_status()
 
     def _ext_do_uninstall(self):

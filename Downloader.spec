@@ -5,7 +5,7 @@ a = Analysis(
     ['Downloader.py'],
     pathex=[],
     binaries=[],
-    datas=[('ico.ico', '.')],
+    datas=[('ico.ico', '.'), ('ChromeExtension', 'ChromeExtension')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

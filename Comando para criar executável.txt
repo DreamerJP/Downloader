@@ -1,1 +1,1 @@
-python -m PyInstaller --onefile --noconsole --icon="ico.ico" --add-data "ico.ico;." --runtime-tmpdir=. Downloader.py
+python -m PyInstaller --onefile --noconsole --icon="ico.ico" --add-data "ico.ico;." --add-data "ChromeExtension;ChromeExtension" --runtime-tmpdir=. Downloader.py
