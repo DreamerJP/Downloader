@@ -526,7 +526,7 @@ class DownloadWorker(QThread):
 
         # Headers HTTP (Padrao, sobrescrito pelos custom headers caso enviados)
         initial_headers = {
-            "User-Agent": "PyDownloadAccelerator/1.5-Optimized",
+            "User-Agent": "PyDownloadAccelerator/1.6-Optimized",
             "Accept": "*/*",
             "Accept-Encoding": "gzip, deflate, br",  # Suporte a compressão
             "Connection": "keep-alive",
@@ -2594,7 +2594,7 @@ class DownloaderGUI(QMainWindow):
         }
 
         # Inicializar updater
-        self.current_version = "1.5"  # Versão atual do programa
+        self.current_version = "1.6"  # Versão atual do programa
         self.updater = Updater(self.current_version)
 
         self.init_ui()
