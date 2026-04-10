@@ -1,100 +1,111 @@
 # Downloader
 
-Acelerador de downloads multi-thread com interface gráfica avançada e otimizações de performance.
+Acelerador de downloads multi-thread com suporte a HLS/M3U8, interface gráfica avançada e extensão integrada para o Chrome.
 
-[![Python](https://img.shields.io/badge/python-3.8+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
-[![PyQt6](https://img.shields.io/badge/PyQt6-6.0+-41CD52.svg?style=flat&logo=qt&logoColor=white)](https://www.qt.io)
+[![Python](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
+[![PyQt6](https://img.shields.io/badge/PyQt6-6.5+-41CD52.svg?style=flat&logo=qt&logoColor=white)](https://www.qt.io)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.5-red.svg?style=flat)](https://github.com/DreamerJP/Downloader/releases)
+[![Version](https://img.shields.io/badge/version-1.6-red.svg?style=flat)](https://github.com/DreamerJP/Downloader/releases)
 
 ---
 
 ## Visão Geral
 
-Ferramenta de download multi-thread desenvolvida em Python com interface PyQt6, oferecendo alta performance através de conexões paralelas e otimizações inteligentes de buffer e chunk size.
+Ferramenta de download desenvolvida em Python com interface PyQt6, capaz de baixar arquivos comuns e streams de vídeo HLS/M3U8 com alta performance usando centenas de conexões paralelas. Inclui uma extensão para o Chrome que captura links de vídeo automaticamente enquanto você navega.
 
-### Principais Funcionalidades
+---
 
-**Performance**
-- Download multi-thread com até centenas de conexões simultâneas
-- Otimização automática de chunk size baseada no tamanho do arquivo
-- Algoritmo de merge otimizado para arquivos de grande volume
-- Monitoramento de velocidade em tempo real com gráficos matplotlib
+## Funcionalidades
 
-**Recursos Técnicos**
-- Verificação de integridade via checksum SHA-256
-- Suporte completo a proxy HTTP/HTTPS com autenticação
-- Detecção automática de qualidade para conteúdo de vídeo
-- Sistema de atualização automática integrado
+### ⚡ Performance
+- Download paralelo com até **512 conexões simultâneas** por arquivo
+- Chunk size adaptativo: **256 KB a 32 MB** dependendo do tamanho do arquivo
+- Merge em RAM para arquivos até ~300 MB (zero operações de disco extras)
+- Otimização **X3D**: chunks de 32 MB para CPUs com cache L3 3D (AMD X3D e similares)
+- Monitoramento em tempo real: velocidade atual, média, pico e ETA
 
-**Interface**
-- Interface gráfica moderna com tema dark
-- Visualização de métricas de download em tempo real
-- Histórico completo de downloads realizados
-- Configurações granulares de conexão e performance
+### 🎬 Suporte a Streams HLS/M3U8
+- Parser completo de **Master Playlist** com seleção automática da resolução máxima
+- Download paralelo de segmentos `.ts` com montagem sequencial automática
+- Suporte a **criptografia AES-128** — descriptografia automática por segmento
+- Fallback inteligente em caso de segmentos com falha
+
+### 🧩 Extensão do Chrome — DreamerJP Advanced Interceptor
+- Captura links de vídeo (M3U8, MP4, TS, MPD) enquanto você assiste no browser
+- Instalação com **um clique** diretamente pelo app (via registro do Windows)
+- Desinstalação limpa também pela interface
+- Sem necessidade de publicar na Chrome Web Store
+
+### 🛠️ Recursos Técnicos
+- Headers HTTP customizados por download (`User-Agent`, `Referer`, `Cookie` etc.)
+- Verificação de integridade via **checksum SHA-256** pós-download
+- Suporte a proxy HTTP/HTTPS com autenticação
+- Detecção automática de qualidade para URLs de vídeo (360p → 4K)
+- Sistema de **atualização automática** integrado
+- Histórico completo de downloads com exportação JSON
 
 ---
 
 ## Requisitos
 
-### Sistema
-- **Python**: 3.8 ou superior
-- **SO**: Windows (suporte principal)
-
-### Dependências
-```
-PyQt6>=6.0.0
-matplotlib>=3.5.0
-requests>=2.28.0
-urllib3>=1.26.0
-```
+| Item | Versão mínima |
+|------|--------------|
+| Python | 3.10+ |
+| SO | Windows 10/11 |
+| Chrome (opcional) | Qualquer versão recente |
 
 ---
 
 ## Instalação
 
-### Via pip (Recomendado)
+### Executável (recomendado para usuários finais)
+
+Baixe `Downloader.exe` na seção [Releases](https://github.com/DreamerJP/Downloader/releases) e execute diretamente — sem instalar nada.
+
+### Modo desenvolvimento (a partir do código-fonte)
+
 ```bash
+# 1. Clonar o repositório
+git clone https://github.com/DreamerJP/Downloader.git
+cd Downloader
+
+# 2. Instalar dependências
 pip install -r requirements.txt
+
+# 3. Executar
 python Downloader.py
 ```
 
-### Instalação manual de dependências
-```bash
-pip install PyQt6 matplotlib requests urllib3
+### Dependências principais
 ```
-
-### Executável pré-compilado
-Disponível na seção [Releases](https://github.com/DreamerJP/Downloader/releases) do repositório.
+PyQt6>=6.5.0
+matplotlib>=3.7.0
+numpy>=1.24.0
+requests>=2.31.0
+urllib3>=2.0.0
+m3u8>=6.0.0
+pycryptodome>=3.20.0
+```
 
 ---
 
 ## Uso
 
-### Configuração Básica
+### Download básico
+1. Cole a URL do arquivo no campo **URL**
+2. Ajuste o número de **Conexões** (padrão: 512)
+3. Clique em **Iniciar**
 
-| Parâmetro | Descrição | Valor Recomendado |
-|-----------|-----------|-------------------|
-| URL | Endereço do arquivo para download | - |
-| Destino | Diretório de salvamento | - |
-| Threads | Número de conexões paralelas | 512 |
+### Download de vídeo HLS/M3U8
+1. Cole a URL da playlist `.m3u8` no campo **URL**
+2. O app detecta automaticamente o tipo de stream e seleciona a melhor resolução
+3. Clique em **Iniciar** — os segmentos são baixados em paralelo e montados automaticamente
 
-### Configurações Avançadas
-
-**Otimização de Rede**
-- Chunk size adaptável (1KB - 10MB)
-- Buffer dinâmico baseado em latência
-- Timeout configurável por conexão
-
-**Proxy e Autenticação**
-- Suporte a HTTP/HTTPS proxy
-- Autenticação básica e digest
-- Bypass de proxy para domínios específicos
-
-**Qualidade de Vídeo**
-- Detecção automática de resolução disponível
-- Seleção manual de qualidade
-- Fallback automático para qualidades inferiores
+### Extensão do Chrome
+1. Abra a aba **🧩 Extensão Chrome** no app
+2. Clique em **Instalar Extensão**
+3. Reinicie o Chrome
+4. Navegue normalmente — a extensão captura vídeos automaticamente
 
 ---
 
@@ -102,50 +113,48 @@ Disponível na seção [Releases](https://github.com/DreamerJP/Downloader/releas
 
 ```
 Downloader/
-├── Downloader.py          # Core da aplicação
-├── requirements.txt       # Dependências do projeto
-├── version.json          # Controle de versionamento
-├── README.md             # Documentação
-└── ico.ico              # Ícone da aplicação
+├── Downloader.py          # Aplicação principal (core + interface)
+├── Downloader.spec        # Configuração do PyInstaller
+├── ChromeExtension/       # Extensão do Chrome (empacotada no .exe)
+│   ├── manifest.json
+│   ├── background.js
+│   ├── content.js
+│   ├── injected.js
+│   ├── popup.html
+│   ├── popup.css
+│   └── popup.js
+├── requirements.txt       # Dependências Python
+├── version.json           # Controle de versão e changelog
+├── ico.ico                # Ícone da aplicação
+└── README.md              # Documentação
 ```
 
 ---
 
-## Desenvolvimento
+## Build do Executável
 
-### Executar em modo debug
-```bash
-python Downloader.py --debug
-```
-
-### Build do executável
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --icon=ico.ico Downloader.py
+pyinstaller Downloader.spec
 ```
 
-### Estrutura de classes principais
-- `DownloadManager`: Gerenciamento de threads e chunks
-- `UIHandler`: Interface gráfica e eventos
-- `UpdateSystem`: Sistema de atualização automática
-- `NetworkOptimizer`: Otimizações de rede e buffer
+> O `Downloader.spec` já está configurado com todos os `hiddenimports` necessários (`m3u8`, `Crypto`, `matplotlib` backend Qt6) e inclui a pasta `ChromeExtension` automaticamente no bundle.
 
 ---
 
-## Performance
+## Principais Classes
 
-### Benchmarks
-- Arquivo 1GB: ~512 threads = 5-8x mais rápido que download single-thread
-- Merge de chunks: Processamento em blocos de 64MB para otimização de memória
-- Overhead de thread: <2% do tempo total de download
-
-### Otimizações Implementadas
-- Buffer circular para redução de I/O em disco
-- Lazy loading de chunks para economia de memória
-- Conexão keep-alive para redução de handshakes TCP
+| Classe | Responsabilidade |
+|--------|-----------------|
+| `DownloadWorker` | Engine de download: multi-thread, HLS, AES, merge |
+| `ChromeExtensionInstaller` | Instalação/remoção da extensão via registro do Windows |
+| `Updater` | Verificação e instalação de novas versões |
+| `SpeedCalculator` | Métricas de velocidade com média móvel |
+| `DownloadHistory` | Histórico persistente em JSON |
+| `DownloaderGUI` | Interface principal (PyQt6 + matplotlib) |
 
 ---
 
 ## Licença
 
-Apache License 2.0 - Consulte o arquivo LICENSE para detalhes.
+Apache License 2.0 — consulte o arquivo [LICENSE](LICENSE) para detalhes.

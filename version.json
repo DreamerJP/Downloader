@@ -1,9 +1,16 @@
 {
-    "version": "1.5",
-    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v1.5/Downloader.exe",
+    "version": "1.6",
+    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v1.6/Downloader.exe",
     "changelog": [
-        "Aumento de buffer para arquivos maiores, otimizando a junção de arquivos",
-        "Correções de bugs e otimizações",
-        "Correção de exibição de progresso"
+        "Suporte a streams HLS/M3U8: download paralelo de segmentos .ts com montagem automática",
+        "Suporte a criptografia AES-128 em streams HLS (descriptografia automática por segmento)",
+        "Suporte a Master Playlist M3U8: seleção automática da resolução máxima disponível",
+        "Headers HTTP customizados por download (User-Agent, Referer, Cookie e outros)",
+        "Otimização X3D: chunks de 32MB para CPUs com cache L3 3D (AMD X3D e similares)",
+        "Instalação automática da extensão Chrome via registro do Windows (nova aba na interface)",
+        "Extensão Chrome agora empacotada dentro do executável para distribuição integrada",
+        "Buffer adaptativo de chunks: ajuste dinâmico entre 256KB e 32MB conforme o arquivo",
+        "Correção: validação de checksum SHA256 movida para posição correta na interface",
+        "Correções gerais de bugs e melhorias de estabilidade"
     ]
 }

@@ -19,6 +19,17 @@ from pathlib import Path
 import requests
 import requests.adapters
 from urllib3.util.retry import Retry
+try:
+    import winreg
+except ImportError:
+    winreg = None
+
+# HLS Support
+try:
+    import m3u8
+    from Crypto.Cipher import AES
+except ImportError:
+    pass
 
 
 def get_resource_path(relative_path):
@@ -110,7 +121,7 @@ TCP_NODELAY = True
 # Configurações de detecção de qualidade
 AUTO_DETECT_QUALITY = True  # Detectar automaticamente melhores qualidades
 VIDEO_QUALITIES = ['360p', '480p', '720p', '1080p', '1440p', '2160p', '4K']  # Ordem de prioridade (menor para maior)
-VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.webm']  # Extensões suportadas
+VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.webm', '.ts']  # Extensões suportadas
 
 
 class Updater:
@@ -480,7 +491,7 @@ class DownloadWorker(QThread):
     total_size_signal = pyqtSignal(object)
     speed_signal = pyqtSignal(float)
     
-    def __init__(self, url, output_path, threads, checksum=None, proxy=None, auth=None, auto_detect_quality=None, connect_timeout=None, read_timeout=None):
+    def __init__(self, url, output_path, threads, checksum=None, proxy=None, auth=None, auto_detect_quality=None, connect_timeout=None, read_timeout=None, custom_headers=None, x3d_opt=False):
         super().__init__()
         self.url = url
         self.output_path = output_path
@@ -497,6 +508,8 @@ class DownloadWorker(QThread):
         self.should_pause = False
         self.connect_timeout = connect_timeout if connect_timeout else CONNECT_TIMEOUT
         self.read_timeout = read_timeout if read_timeout else READ_TIMEOUT
+        self.custom_headers = custom_headers
+        self.x3d_opt = x3d_opt
 
         # Configurar sessão HTTP otimizada
         self.session = self._create_optimized_session()
@@ -511,13 +524,20 @@ class DownloadWorker(QThread):
         """Cria sessão HTTP com otimizações de performance"""
         session = requests.Session()
 
-        # Headers HTTP
-        session.headers.update({
+        # Headers HTTP (Padrao, sobrescrito pelos custom headers caso enviados)
+        initial_headers = {
             "User-Agent": "PyDownloadAccelerator/1.5-Optimized",
             "Accept": "*/*",
             "Accept-Encoding": "gzip, deflate, br",  # Suporte a compressão
             "Connection": "keep-alive",
-        })
+        }
+        
+        if self.custom_headers:
+            for key, val in self.custom_headers.items():
+                if val:  # Só adiciona se o header não for vazio
+                    initial_headers[key] = val
+                    
+        session.headers.update(initial_headers)
 
         # Configurar proxy se fornecido
         if self.proxy:
@@ -632,7 +652,9 @@ class DownloadWorker(QThread):
 
     def _optimize_chunk_size(self, file_size):
         """Ajusta o tamanho do chunk baseado no tamanho do arquivo"""
-        if file_size < 1024 * 1024:  # < 1MB
+        if getattr(self, 'x3d_opt', False):
+            self.actual_chunk_size = 1024 * 1024 * 32  # 32MB L3 Cache / X3D Optimization
+        elif file_size < 1024 * 1024:  # < 1MB
             self.actual_chunk_size = SMALL_CHUNK_SIZE
         elif file_size < 100 * 1024 * 1024:  # < 100MB
             self.actual_chunk_size = CHUNK_SIZE
@@ -1335,21 +1357,207 @@ class DownloadWorker(QThread):
         
         return False
 
+    def _download_m3u8_flow(self, m3u8_url, output_path, part_dir):
+        """Fluxo HLS customizado: Parser de playlist, segmentos, decriptação e concatenacao binaria."""
+        self.log_signal.emit("Carregando playlist M3U8 Master...", "info")
+        
+        headers = {}
+        if hasattr(self, 'custom_headers') and self.custom_headers:
+            headers = self.custom_headers
+            
+        try:
+            r = self.session.get(m3u8_url, headers=headers, timeout=(self.connect_timeout, self.read_timeout))
+            r.raise_for_status()
+            
+            # Checar se m3u8 foi importado com sucesso
+            if 'm3u8' not in sys.modules:
+                self.log_signal.emit("Módulo m3u8 não encontrado. Faltam dependências.", "error")
+                return False
+                
+            playlist = m3u8.loads(r.text, uri=m3u8_url)
+            
+            # Se for Variant Playlist (Master)
+            if playlist.is_variant:
+                self.log_signal.emit(f"Master Playlist detectada com {len(playlist.playlists)} resoluções.", "info")
+                # Escolher a melhor resolucao baseada na bandwidth
+                best_playlist = sorted(playlist.playlists, key=lambda p: p.stream_info.bandwidth if p.stream_info.bandwidth else 0, reverse=True)[0]
+                self.log_signal.emit(f"Resolução selecionada: {best_playlist.stream_info.resolution or 'Máxima'}", "success")
+                return self._download_m3u8_flow(best_playlist.absolute_uri, output_path, part_dir)
+                
+            segments = playlist.segments
+            if not segments:
+                self.log_signal.emit("Nenhum segmento encontrado na playlist.", "error")
+                return False
+                
+            self.log_signal.emit(f"Vídeo HLS com {len(segments)} peças (.ts). Preparando download paralelo...", "info")
+            
+            # Checar criptografia AES
+            key = None
+            if hasattr(playlist, 'keys') and playlist.keys and playlist.keys[0] and playlist.keys[0].method == 'AES-128':
+                self.log_signal.emit("🛡️ Detectada Encriptação AES-128, buscando chaves...", "warning")
+                if 'AES' not in sys.modules:
+                    self.log_signal.emit("Erro: Módulo pycryptodome não encontrado. Execute: pip install pycryptodome", "error")
+                    return False
+                    
+                key_uri = playlist.keys[0].absolute_uri
+                r_key = self.session.get(key_uri, headers=headers, timeout=10)
+                r_key.raise_for_status()
+                key = r_key.content
+                if len(key) != 16:
+                    self.log_signal.emit(f"Chave AES inválida: {len(key)} bytes.", "error")
+                    return False
+                self.log_signal.emit("Chave de Descriptografia Obtida com Sucesso!", "success")
+            
+            # Criar lista de tarefas (segmentos) para o executor
+            parts = []
+            for i, seg in enumerate(segments):
+                parts.append((i, seg.absolute_uri))
+                
+            self.total_size_signal.emit(0) # HLS não tem tamanho preemptivo garantido facilmente
+            
+            # Configuração do Download de M3U8
+            completed = 0
+            failed_parts = []
+            downloaded_bytes_session = 0
+            
+            # Download chunks - limitação de workers pra não crashar a thread_pool
+            with ThreadPoolExecutor(max_workers=min(int(self.threads), 256), thread_name_prefix="HLS") as executor:
+                futures = {}
+                for idx, (i, seg_url) in enumerate(parts):
+                    ppath = os.path.join(part_dir, f"segment_{i}.ts")
+                    key_info = playlist.keys[0] if (hasattr(playlist, 'keys') and playlist.keys and key) else None
+                    future = executor.submit(self._download_segment_worker, seg_url, ppath, i, key, key_info)
+                    futures[future] = i
+                    
+                last_progress_log = 0
+                for future in as_completed(futures):
+                    if self.should_stop:
+                        break
+                    part_idx = futures[future]
+                    completed += 1
+                    
+                    success, size = future.result()
+                    if not success:
+                         failed_parts.append(part_idx)
+                    else:
+                         downloaded_bytes_session += size
+                         with self.lock:
+                             self.downloaded_bytes += size
+                             self.progress_signal.emit(size)
+                             
+                    current_progress_pct = int((completed / len(parts)) * 100)
+                    if current_progress_pct >= last_progress_log + 10 or completed == 1:
+                        self.log_signal.emit(f"Peças baixadas: {completed}/{len(parts)} ({current_progress_pct}%)", "info")
+                        last_progress_log = current_progress_pct
+                        
+            if self.should_stop:
+                self.log_signal.emit("Download HLS cancelado.", "warning")
+                return False
+                
+            if failed_parts:
+                self.log_signal.emit(f"Falha ao baixar {len(failed_parts)} peças. Video ficará corrompido.", "error")
+                return False
+                
+            self.log_signal.emit("Todas as peças baixadas! Unindo fluxo de vídeo (Merge)...", "info")
+            if hasattr(self, 'speed_calc') and self.speed_calc:
+                self.speed_calc.stop_tracking()
+            
+            # Realizar o Merge em ordem sequencial
+            with open(output_path, "wb") as outf:
+                for i, _ in parts:
+                    ppath = os.path.join(part_dir, f"segment_{i}.ts")
+                    if os.path.exists(ppath):
+                        with open(ppath, "rb") as pf:
+                            outf.write(pf.read())
+                        
+            # Ajustar extensão para .ts (Transport Stream) que é a correta para HLS concatenado sem FFmpeg
+            # Isso evita travamentos na linha do tempo (seek issues) por falta de índice MP4
+            if not output_path.lower().endswith(".ts"):
+                base = os.path.splitext(output_path)[0]
+                new_path = base + ".ts"
+                
+                # Se o arquivo já existe, remove anterior
+                if os.path.exists(new_path):
+                    try: os.remove(new_path)
+                    except: pass
+                
+                try:
+                    os.rename(output_path, new_path)
+                    self.output_path = new_path
+                    self.log_signal.emit("Extensão ajustada para .ts para garantir fluidez na linha do tempo.", "info")
+                except Exception as e:
+                    self.log_signal.emit(f"Aviso: Não foi possível renomear para .ts: {e}", "warning")
+            
+            self.log_signal.emit("Limpando arquivos temporários M3U8...", "info")
+            for i, _ in parts:
+                try: os.remove(os.path.join(part_dir, f"segment_{i}.ts"))
+                except: pass
+            try: os.rmdir(part_dir)
+            except: pass
+            
+            return True
+        except Exception as e:
+            self.log_signal.emit(f"Erro fatal no processamento M3U8/HLS: {e}", "error")
+            return False
+
+    def _download_segment_worker(self, url, filepath, index, key=None, key_info=None):
+        """Worker específico para baixar um segmento TS e decriptar se necessário."""
+        headers = {}
+        if hasattr(self, 'custom_headers') and self.custom_headers:
+            headers = self.custom_headers
+            
+        attempt = 0
+        while attempt < RETRY_LIMIT and not self.should_stop:
+            while self.should_pause and not self.should_stop:
+                time.sleep(0.1)
+                
+            try:
+                if os.path.exists(filepath):
+                    return (True, os.path.getsize(filepath))
+                    
+                r = self.session.get(url, headers=headers, timeout=(self.connect_timeout, self.read_timeout))
+                r.raise_for_status()
+                data = r.content
+                
+                # Decriptar
+                if key and key_info and 'AES' in sys.modules:
+                    iv = None
+                    if hasattr(key_info, 'iv') and key_info.iv:
+                        iv = bytes.fromhex(key_info.iv.replace('0x', ''))
+                    else:
+                        seq = index
+                        # se a chave tiver propriedade sequence (geralmente nao tem no py m3u8 padrao)
+                        iv = seq.to_bytes(16, 'big')
+                        
+                    cipher = AES.new(key, AES.MODE_CBC, iv)
+                    data = cipher.decrypt(data)
+                    
+                    pad_len = data[-1]
+                    if 0 < pad_len <= 16:
+                        data = data[:-pad_len]
+                
+                with open(filepath, "wb") as f:
+                    f.write(data)
+                    
+                return (True, len(data))
+                
+            except Exception:
+                attempt += 1
+                if attempt == RETRY_LIMIT:
+                    return (False, 0)
+                time.sleep(1)
+        return (False, 0)
+
     def run(self):
         # Sistema de Prioridade: Definir prioridade ALTA no Windows
         try:
             if sys.platform == 'win32':
-                import kernel32
+                import ctypes
                 # HIGH_PRIORITY_CLASS = 0x00000080
-                handle = kernel32.GetCurrentProcess()
-                kernel32.SetPriorityClass(handle, 0x00000080)
+                handle = ctypes.windll.kernel32.GetCurrentProcess()
+                ctypes.windll.kernel32.SetPriorityClass(handle, 0x00000080)
         except:
-            try:
-                # Alternativa via subprocess se kernel32 não estiver direto
-                if sys.platform == 'win32':
-                    os.system(f'wmic process where processid={os.getpid()} CALL setpriority "high priority"')
-            except:
-                pass
+            pass
 
         self.start_time = time.time()
         part_dir = None
@@ -1379,6 +1587,23 @@ class DownloadWorker(QThread):
                 self.log_signal.emit(f"Tamanho do arquivo: {size_mb:.2f} MB", "info")
                 if content_encoding:
                     self.log_signal.emit(f"Compressão detectada: {content_encoding}", "info")
+
+            # M3U8 DETECT HOOK
+            m3u8_detected = False
+            url_low = self.url.lower()
+            if ".m3u8" in url_low or "master.txt" in url_low or "playlist" in url_low:
+                m3u8_detected = True
+                
+            if m3u8_detected and "m3u8" in sys.modules:
+                self.log_signal.emit("🔄 Detectado Fluxo HLS Dinâmico! Iniciando Motor M3U8 Nativo...", "success")
+                success = self._download_m3u8_flow(self.url, self.output_path, part_dir)
+                if success:
+                    duration = time.time() - self.start_time
+                    self.log_signal.emit(f"Vídeo finalizado e unido em {duration:.1f}s!", "success")
+                    self.finished_signal.emit(True, f"Download concluído: {self.output_path}")
+                else:
+                    self.finished_signal.emit(False, "Falha no download HLS/M3U8")
+                return
 
             if total_len is None or accept_ranges != "bytes":
                 self.log_signal.emit("Download single-thread (servidor não suporta ranges)", "warning")
@@ -1641,6 +1866,184 @@ class DownloadWorker(QThread):
                 # Não emitir log aqui para não interferir com outras mensagens
                 print(f"Erro na limpeza final: {cleanup_error}")
 
+class ChromeExtensionInstaller:
+    """
+    Gerencia instalação e desinstalação da extensão Chrome via registro do Windows.
+    Usa a política HKCU\\SOFTWARE\\Google\\Chrome\\Extensions para registrar
+    extensões locais (unpacked) sem necessidade de publicação na Chrome Web Store.
+    """
+
+    # ID estável derivado do nome — pode depois ser substituído pelo ID real gerado pelo Chrome
+    EXT_DEST_RELATIVE = os.path.join("DreamerJP", "ChromeExtension")
+    REG_BASE = r"SOFTWARE\Google\Chrome\Extensions"
+
+    def __init__(self, log_callback=None):
+        """
+        Parâmetros:
+            log_callback: função(msg: str, level: str) chamada para registrar logs.
+        """
+        self.log = log_callback or (lambda msg, lvl="info": print(f"[{lvl.upper()}] {msg}"))
+        self.ext_src = self._find_extension_source()
+        self.ext_dest = os.path.join(os.path.expandvars("%APPDATA%"), self.EXT_DEST_RELATIVE)
+
+    def _find_extension_source(self):
+        """Localiza a pasta ChromeExtension tanto em dev quanto no executável PyInstaller."""
+        # Modo executável PyInstaller: pasta extraída em _MEIPASS
+        if getattr(sys, "frozen", False):
+            candidate = os.path.join(sys._MEIPASS, "ChromeExtension")
+            if os.path.isdir(candidate):
+                return candidate
+        # Modo desenvolvimento: relativo ao script
+        candidate = os.path.join(os.path.abspath("."), "ChromeExtension")
+        if os.path.isdir(candidate):
+            return candidate
+        return None
+
+    def _read_manifest_version(self):
+        """Lê a versão do manifest.json da extensão."""
+        try:
+            manifest_path = os.path.join(self.ext_dest, "manifest.json")
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("version", "1.0")
+        except Exception:
+            return "1.0"
+
+    def _get_extension_id(self):
+        """
+        Deriva um ID de extensão Chrome compatível (32 chars a-p) a partir
+        do caminho de instalação, similar ao que o Chrome faz internamente.
+        """
+        import hashlib
+        path_hash = hashlib.sha256(self.ext_dest.lower().encode()).hexdigest()[:32]
+        # Chrome extension IDs usam a-p (não hex normal)
+        ext_id = "".join(chr(ord('a') + int(c, 16)) for c in path_hash)
+        return ext_id
+
+    def is_available(self):
+        """Verifica se os arquivos da extensão estão disponíveis para instalar."""
+        return self.ext_src is not None and os.path.isdir(self.ext_src)
+
+    def is_installed(self):
+        """Verifica se a extensão está registrada no Windows."""
+        if not winreg:
+            return False
+        try:
+            ext_id = self._get_extension_id()
+            reg_path = f"{self.REG_BASE}\\{ext_id}"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path):
+                return True
+        except FileNotFoundError:
+            return False
+        except Exception:
+            return False
+
+    def get_chrome_paths(self):
+        """Retorna lista de possíveis executáveis do Chrome encontrados no sistema."""
+        candidates = [
+            os.path.expandvars(r"%PROGRAMFILES%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ]
+        return [p for p in candidates if os.path.isfile(p)]
+
+    def is_chrome_installed(self):
+        """Verifica se o Google Chrome está instalado."""
+        return len(self.get_chrome_paths()) > 0
+
+    def install(self):
+        """
+        Copia os ficheiros da extensão e regista no Windows.
+
+        Retorna:
+            (bool, str): (sucesso, mensagem)
+        """
+        if not winreg:
+            return False, "winreg não disponível (não é Windows)."
+
+        if not self.is_available():
+            return False, "Pasta ChromeExtension não encontrada. Reinstale o aplicativo."
+
+        if not self.is_chrome_installed():
+            return False, "Google Chrome não encontrado. Instale o Chrome primeiro."
+
+        try:
+            # 1. Copiar arquivos para destino permanente
+            self.log(f"Copiando extensão para: {self.ext_dest}", "info")
+            os.makedirs(self.ext_dest, exist_ok=True)
+            for fname in os.listdir(self.ext_src):
+                src_file = os.path.join(self.ext_src, fname)
+                dst_file = os.path.join(self.ext_dest, fname)
+                if os.path.isfile(src_file):
+                    shutil.copy2(src_file, dst_file)
+            self.log("Arquivos copiados com sucesso.", "info")
+
+            # 2. Registrar no Windows
+            ext_id = self._get_extension_id()
+            version = self._read_manifest_version()
+            manifest_path = os.path.join(self.ext_dest, "manifest.json")
+            reg_path = f"{self.REG_BASE}\\{ext_id}"
+
+            self.log(f"Registrando extensão (ID: {ext_id[:12]}...)", "info")
+
+            key = winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER,
+                reg_path,
+                0,
+                winreg.KEY_SET_VALUE
+            )
+            winreg.SetValueEx(key, "path",    0, winreg.REG_SZ, manifest_path)
+            winreg.SetValueEx(key, "version", 0, winreg.REG_SZ, version)
+            winreg.CloseKey(key)
+
+            self.log("Registro criado com sucesso.", "info")
+            return True, (
+                f"Extensão instalada com sucesso!\n"
+                f"Reinicie o Chrome para ativá-la.\n"
+                f"Destino: {self.ext_dest}"
+            )
+
+        except PermissionError:
+            return False, "Permissão negada ao acessar o registro. Tente executar como administrador."
+        except Exception as e:
+            return False, f"Erro durante a instalação: {e}"
+
+    def uninstall(self):
+        """
+        Remove o registro e os arquivos da extensão.
+
+        Retorna:
+            (bool, str): (sucesso, mensagem)
+        """
+        if not winreg:
+            return False, "winreg não disponível."
+
+        errors = []
+
+        # 1. Remover chave do registro
+        try:
+            ext_id = self._get_extension_id()
+            reg_path = f"{self.REG_BASE}\\{ext_id}"
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, reg_path)
+            self.log("Registro removido.", "info")
+        except FileNotFoundError:
+            self.log("Registro não encontrado (já removido?).", "warning")
+        except Exception as e:
+            errors.append(f"Erro no registro: {e}")
+
+        # 2. Remover arquivos
+        try:
+            if os.path.isdir(self.ext_dest):
+                shutil.rmtree(self.ext_dest, ignore_errors=True)
+                self.log("Arquivos removidos.", "info")
+        except Exception as e:
+            errors.append(f"Erro ao remover arquivos: {e}")
+
+        if errors:
+            return False, "Desinstalação parcial:\n" + "\n".join(errors)
+        return True, "Extensão desinstalada. Reinicie o Chrome para que a remoção seja aplicada."
+
+
 class AboutDialog(QDialog):
     """Diálogo Sobre com informações do programa"""
     def __init__(self, parent=None):
@@ -1845,39 +2248,16 @@ class AdvancedSettingsDialog(QDialog):
         
         layout.addWidget(timeout_group)
         
-        # Grupo: Verificação de Integridade
-        integrity_group = QGroupBox("Verificação de Integridade")
-        integrity_layout = QVBoxLayout(integrity_group)
-        integrity_layout.setSpacing(8)
+        # Grupo: Timeouts
 
-        # Texto explicativo
-        integrity_info = QLabel("🔐 <b>Verificação de Integridade (Opcional)</b><br><br>"
-                               "• Cole o hash SHA256 fornecido pelo site ANTES de iniciar o download<br>"
-                               "• Após o download, o arquivo será verificado automaticamente<br>"
-                               "• Use para garantir que o arquivo não foi corrompido")
-        integrity_info.setWordWrap(True)
-        integrity_info.setStyleSheet("color: #b0b0b0; font-size: 11px; padding-bottom: 8px;")
-        integrity_layout.addWidget(integrity_info)
-
-        # Campo de input
-        input_layout = QHBoxLayout()
-        input_layout.addWidget(QLabel("SHA256:"))
-        self.checksum_input = QLineEdit()
-        self.checksum_input.setPlaceholderText("Cole o hash SHA256 aqui")
-        self.checksum_input.setToolTip("Cole o hash SHA256 fornecido pelo site de download.\n"
-                                      "A verificação acontece automaticamente após o download terminar.")
-        # Validação em tempo real do formato SHA256
-        self.checksum_input.textChanged.connect(self._validate_checksum)
-        input_layout.addWidget(self.checksum_input)
-
-        # Status de validação
-        self.checksum_status = QLabel("")
-        self.checksum_status.setStyleSheet("font-size: 10px; color: #666666;")
-        input_layout.addWidget(self.checksum_status)
-
-        integrity_layout.addLayout(input_layout)
-        
-        layout.addWidget(integrity_group)
+        # Grupo: Otimização Pessoal
+        opt_group = QGroupBox("Maximização de CPU (Avançado)")
+        opt_layout = QVBoxLayout(opt_group)
+        opt_layout.setSpacing(8)
+        self.x3d_opt_cb = QCheckBox("Otimização X3D / L3 Cache (32MB Chunks)")
+        self.x3d_opt_cb.setToolTip("Direciona blocos de 32MB para preencher o L3 Cache e zerar gargalo de fila IO (Para Ryzen X3D).")
+        opt_layout.addWidget(self.x3d_opt_cb)
+        layout.addWidget(opt_group)
         
         layout.addStretch()
         
@@ -1891,26 +2271,6 @@ class AdvancedSettingsDialog(QDialog):
 
         # Aplicar tema
         self.apply_theme()
-
-    def _validate_checksum(self, text):
-        """Valida o formato do hash SHA256 em tempo real"""
-        if not text.strip():
-            self.checksum_status.setText("")
-            self.checksum_status.setStyleSheet("font-size: 10px; color: #666666;")
-            return
-
-        # SHA256 deve ter exatamente 64 caracteres hexadecimais
-        if re.match(r'^[a-fA-F0-9]{64}$', text):
-            self.checksum_status.setText("✓ Válido")
-            self.checksum_status.setStyleSheet("font-size: 10px; color: #7a9a7a; font-weight: bold;")
-        else:
-            if len(text) > 64:
-                self.checksum_status.setText("✗ Muito longo")
-            elif len(text) < 64 and text:
-                self.checksum_status.setText(f"✗ {64 - len(text)} caracteres restantes")
-            else:
-                self.checksum_status.setText("✗ Formato inválido")
-            self.checksum_status.setStyleSheet("font-size: 10px; color: #9a7a7a; font-weight: bold;")
 
     def apply_theme(self):
         """Aplica tema escuro ao diálogo"""
@@ -1974,14 +2334,12 @@ class AdvancedSettingsDialog(QDialog):
         auth_user = self.auth_user_input.text().strip()
         auth_pass = self.auth_pass_input.text().strip()
         auth = (auth_user, auth_pass) if auth_user and auth_pass else None
-        checksum = self.checksum_input.text().strip() or None
-        
         return {
             'proxy': proxy,
             'auth': auth,
-            'checksum': checksum,
             'connect_timeout': self.connect_timeout_input.value(),
-            'read_timeout': self.read_timeout_input.value()
+            'read_timeout': self.read_timeout_input.value(),
+            'x3d_opt': getattr(self, 'x3d_opt_cb', QCheckBox()).isChecked()
         }
     
     def set_settings(self, settings):
@@ -1991,12 +2349,12 @@ class AdvancedSettingsDialog(QDialog):
         if settings.get('auth'):
             self.auth_user_input.setText(settings['auth'][0])
             self.auth_pass_input.setText(settings['auth'][1])
-        if settings.get('checksum'):
-            self.checksum_input.setText(settings['checksum'])
         if settings.get('connect_timeout'):
             self.connect_timeout_input.setValue(settings['connect_timeout'])
         if settings.get('read_timeout'):
             self.read_timeout_input.setValue(settings['read_timeout'])
+        if 'x3d_opt' in settings and hasattr(self, 'x3d_opt_cb'):
+            self.x3d_opt_cb.setChecked(settings['x3d_opt'])
 
 class SpeedChartWidget(QWidget):
     """Widget personalizado para gráfico de velocidade de download em tempo real"""
@@ -2012,6 +2370,8 @@ class SpeedChartWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.canvas)
         layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.setMinimumHeight(200)
         
         self.time_data = []
         self.speed_data = []
@@ -2240,7 +2600,8 @@ class DownloaderGUI(QMainWindow):
         # Definir ícone da janela
         self.setWindowIcon(self._get_icon())
 
-        default_size = QSize(1000, 700)
+        default_size = QSize(1000, 950)
+        self.setMinimumSize(800, 900)
         self.resize(default_size)
         
         # Criar barra de menu
@@ -2354,6 +2715,21 @@ class DownloaderGUI(QMainWindow):
         
         download_layout.addLayout(basic_settings_layout)
         
+        # Checksum Integridade
+        checksum_layout = QHBoxLayout()
+        checksum_layout.addWidget(QLabel("Verificar (SHA256):"))
+        self.checksum_input = QLineEdit()
+        self.checksum_input.setPlaceholderText("Cole o hash SHA256 após o download (Opcional)")
+        self.checksum_input.textChanged.connect(self._validate_checksum)
+        checksum_layout.addWidget(self.checksum_input)
+        
+        self.checksum_status = QLabel("")
+        self.checksum_status.setMinimumWidth(100)
+        self.checksum_status.setStyleSheet("font-size: 11px; color: #666666;")
+        checksum_layout.addWidget(self.checksum_status)
+        
+        download_layout.addLayout(checksum_layout)
+        
         # Botões principais
         buttons_layout = QHBoxLayout()
 
@@ -2422,6 +2798,7 @@ class DownloaderGUI(QMainWindow):
 
         # Gráfico de Velocidade
         chart_group = QGroupBox("Gráfico de Velocidade")
+        chart_group.setMinimumHeight(220)
         chart_layout = QVBoxLayout(chart_group)
         chart_layout.addWidget(self.speed_chart)
         download_layout.addWidget(chart_group)
@@ -2454,25 +2831,257 @@ class DownloaderGUI(QMainWindow):
         history_layout.addWidget(self.history_table)
         
         tabs.addTab(history_tab, "Histórico")
+
+        # Tab 3: Extensão Chrome
+        chrome_tab = self._build_chrome_extension_tab()
+        tabs.addTab(chrome_tab, "🧩 Extensão Chrome")
+
+        # Guardar referência para atualizar status depois
+        self._tabs = tabs
         
         layout.addWidget(tabs)
 
         self.apply_dark_theme()
         self.load_history()
         
+    # ------------------------------------------------------------------ #
+    #  Extensão Chrome                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _build_chrome_extension_tab(self):
+        """Constrói a aba de instalação da extensão do Chrome."""
+        from PyQt6.QtWidgets import QScrollArea, QFrame
+
+        self._ext_installer = ChromeExtensionInstaller(log_callback=self._ext_log)
+
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(20)
+
+        # --- Cabeçalho ---
+        header_lbl = QLabel("🧩 Extensão do Chrome — DreamerJP Advanced Interceptor")
+        header_lbl.setStyleSheet(
+            "font-size: 15px; font-weight: bold; color: #c8d8e8; padding-bottom: 4px;"
+        )
+        outer.addWidget(header_lbl)
+
+        desc_lbl = QLabel(
+            "A extensão captura links de vídeo (M3U8, MP4, TS, MPD) diretamente do "
+            "site que você está assistindo e os envia para este programa baixar automaticamente."
+        )
+        desc_lbl.setWordWrap(True)
+        desc_lbl.setStyleSheet("color: #a0a8b0; font-size: 11px;")
+        outer.addWidget(desc_lbl)
+
+        # --- Status card ---
+        status_group = QGroupBox("Status")
+        status_layout = QVBoxLayout(status_group)
+        status_layout.setSpacing(10)
+
+        self._ext_chrome_status = QLabel("Verificando...")
+        self._ext_chrome_status.setStyleSheet("font-size: 11px;")
+        status_layout.addWidget(self._ext_chrome_status)
+
+        self._ext_install_status = QLabel("Verificando...")
+        self._ext_install_status.setStyleSheet("font-size: 11px;")
+        status_layout.addWidget(self._ext_install_status)
+
+        self._ext_src_status = QLabel("Verificando...")
+        self._ext_src_status.setStyleSheet("font-size: 11px;")
+        status_layout.addWidget(self._ext_src_status)
+
+        self._ext_dest_label = QLabel("")
+        self._ext_dest_label.setStyleSheet("font-size: 10px; color: #606878;")
+        self._ext_dest_label.setWordWrap(True)
+        status_layout.addWidget(self._ext_dest_label)
+
+        outer.addWidget(status_group)
+
+        # --- Botões ---
+        btn_layout = QHBoxLayout()
+
+        self._ext_install_btn = QPushButton("⬇  Instalar Extensão")
+        self._ext_install_btn.setMinimumHeight(38)
+        self._ext_install_btn.setStyleSheet(
+            "QPushButton { background-color: #2a5a2a; border-color: #3a7a3a; "
+            "color: #d0f0d0; font-weight: bold; } "
+            "QPushButton:hover { background-color: #336633; } "
+            "QPushButton:disabled { background-color: #1a1a1a; color: #555; }"
+        )
+        self._ext_install_btn.clicked.connect(self._ext_do_install)
+        btn_layout.addWidget(self._ext_install_btn)
+
+        self._ext_uninstall_btn = QPushButton("🗑  Desinstalar Extensão")
+        self._ext_uninstall_btn.setMinimumHeight(38)
+        self._ext_uninstall_btn.setStyleSheet(
+            "QPushButton { background-color: #5a2a2a; border-color: #7a3a3a; "
+            "color: #f0d0d0; font-weight: bold; } "
+            "QPushButton:hover { background-color: #663333; } "
+            "QPushButton:disabled { background-color: #1a1a1a; color: #555; }"
+        )
+        self._ext_uninstall_btn.clicked.connect(self._ext_do_uninstall)
+        btn_layout.addWidget(self._ext_uninstall_btn)
+
+        self._ext_open_chrome_btn = QPushButton("🌐  Abrir chrome://extensions")
+        self._ext_open_chrome_btn.setMinimumHeight(38)
+        self._ext_open_chrome_btn.clicked.connect(self._ext_open_chrome_extensions)
+        btn_layout.addWidget(self._ext_open_chrome_btn)
+
+        self._ext_refresh_btn = QPushButton("🔄")
+        self._ext_refresh_btn.setMaximumWidth(44)
+        self._ext_refresh_btn.setMinimumHeight(38)
+        self._ext_refresh_btn.setToolTip("Atualizar status")
+        self._ext_refresh_btn.clicked.connect(self._ext_refresh_status)
+        btn_layout.addWidget(self._ext_refresh_btn)
+
+        outer.addLayout(btn_layout)
+
+        # --- Log da aba ---
+        log_group = QGroupBox("Log de Instalação")
+        log_layout = QVBoxLayout(log_group)
+        self._ext_log_output = QTextEdit()
+        self._ext_log_output.setReadOnly(True)
+        self._ext_log_output.setMinimumHeight(120)
+        self._ext_log_output.setMaximumHeight(180)
+        log_layout.addWidget(self._ext_log_output)
+        outer.addWidget(log_group)
+
+        # --- Instruções ---
+        guide_group = QGroupBox("Como usar após instalar")
+        guide_layout = QVBoxLayout(guide_group)
+        guide_lbl = QLabel(
+            "<ol style='margin:0; padding-left:18px; line-height:1.8;'>"
+            "<li>Clique em <b>Instalar Extensão</b> acima.</li>"
+            "<li>Reinicie o Google Chrome completamente (feche e reabra).</li>"
+            "<li>Acesse <b>chrome://extensions</b> → confirme a extensão na lista.</li>"
+            "<li>Navegue normalmente — quando um vídeo começar a tocar, a extensão "
+            "captura o link e o envia automaticamente ao Downloader.</li>"
+            "<li>Verifique a aba <b>Download</b> — a URL aparecerá pronta para baixar.</li>"
+            "</ol>"
+        )
+        guide_lbl.setWordWrap(True)
+        guide_lbl.setStyleSheet("font-size: 11px; color: #a8b8c8; padding: 4px;")
+        guide_layout.addWidget(guide_lbl)
+        outer.addWidget(guide_group)
+
+        outer.addStretch()
+
+        # Atualizar status ao abrir
+        QTimer.singleShot(300, self._ext_refresh_status)
+
+        return tab
+
+    def _ext_log(self, msg, level="info"):
+        """Grava mensagem no log da aba de extensão."""
+        colors = {"info": "#c8d8e8", "warning": "#e8c870", "error": "#e88070", "success": "#80e890"}
+        color = colors.get(level, "#c8d8e8")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        html = f'<span style="color:#606878;">[{timestamp}]</span> <span style="color:{color};">{msg}</span>'
+        if hasattr(self, "_ext_log_output"):
+            self._ext_log_output.append(html)
+
+    def _ext_refresh_status(self):
+        """Atualiza todos os indicadores de status da aba de extensão."""
+        inst = self._ext_installer
+
+        # Chrome instalado?
+        if inst.is_chrome_installed():
+            self._ext_chrome_status.setText("🟢  Google Chrome detectado no sistema.")
+            self._ext_chrome_status.setStyleSheet("font-size: 11px; color: #80e890;")
+        else:
+            self._ext_chrome_status.setText("🔴  Google Chrome NÃO encontrado. Instale o Chrome primeiro.")
+            self._ext_chrome_status.setStyleSheet("font-size: 11px; color: #e88070;")
+
+        # Arquivos fonte disponíveis?
+        if inst.is_available():
+            self._ext_src_status.setText(f"🟢  Arquivos da extensão encontrados: {inst.ext_src}")
+            self._ext_src_status.setStyleSheet("font-size: 10px; color: #80e890;")
+        else:
+            self._ext_src_status.setText("🔴  Arquivos da extensão não encontrados. Reinstale o aplicativo.")
+            self._ext_src_status.setStyleSheet("font-size: 11px; color: #e88070;")
+
+        # Extensão registrada no Windows?
+        if inst.is_installed():
+            self._ext_install_status.setText("🟢  Extensão registrada no Windows (registro OK).")
+            self._ext_install_status.setStyleSheet("font-size: 11px; color: #80e890;")
+            self._ext_dest_label.setText(f"📂 Instalada em: {inst.ext_dest}")
+        else:
+            self._ext_install_status.setText("⚪  Extensão não instalada.")
+            self._ext_install_status.setStyleSheet("font-size: 11px; color: #909090;")
+            self._ext_dest_label.setText("")
+
+        # Habilitar/desabilitar botões
+        can_install = inst.is_available() and inst.is_chrome_installed()
+        self._ext_install_btn.setEnabled(can_install and not inst.is_installed())
+        self._ext_uninstall_btn.setEnabled(inst.is_installed())
+        self._ext_open_chrome_btn.setEnabled(inst.is_chrome_installed())
+
+    def _ext_do_install(self):
+        """Executa a instalação da extensão e atualiza a UI."""
+        self._ext_log("Iniciando instalação...", "info")
+        self._ext_install_btn.setEnabled(False)
+        success, msg = self._ext_installer.install()
+        if success:
+            self._ext_log(msg, "success")
+            QMessageBox.information(self, "Extensão Chrome", msg)
+        else:
+            self._ext_log(msg, "error")
+            QMessageBox.critical(self, "Erro na Instalação", msg)
+        self._ext_refresh_status()
+
+    def _ext_do_uninstall(self):
+        """Executa a desinstalação da extensão e atualiza a UI."""
+        reply = QMessageBox.question(
+            self, "Confirmar Desinstalação",
+            "Deseja remover a extensão do Chrome e seus arquivos?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._ext_log("Iniciando desinstalação...", "info")
+        success, msg = self._ext_installer.uninstall()
+        if success:
+            self._ext_log(msg, "success")
+            QMessageBox.information(self, "Extensão Chrome", msg)
+        else:
+            self._ext_log(msg, "error")
+            QMessageBox.warning(self, "Desinstalação Parcial", msg)
+        self._ext_refresh_status()
+
+    def _ext_open_chrome_extensions(self):
+        """Abre a página chrome://extensions no Chrome."""
+        chrome_paths = self._ext_installer.get_chrome_paths()
+        if chrome_paths:
+            try:
+                subprocess.Popen([chrome_paths[0], "chrome://extensions"])
+                self._ext_log("Chrome aberto em chrome://extensions.", "info")
+            except Exception as e:
+                self._ext_log(f"Erro ao abrir Chrome: {e}", "error")
+        else:
+            QMessageBox.warning(self, "Chrome não encontrado", "Não foi possível localizar o executável do Chrome.")
+
     def load_window_state(self):
         """Carrega o tamanho e posição da janela salva"""
-        size = self.settings.value("size", QSize(1000, 700))
+        size = self.settings.value("size", QSize(1000, 950))
         if isinstance(size, QSize):
             self.resize(size)
         pos = self.settings.value("pos")
         if pos:
             self.move(pos)
+            
+        adv = self.settings.value("advanced_settings")
+        if adv:
+            try:
+                self.advanced_settings.update(json.loads(adv))
+            except Exception:
+                pass
     
     def save_window_state(self):
-        """Salva o tamanho e posição da janela"""
+        """Salva o tamanho e posição da janela e configurações avançadas"""
         self.settings.setValue("size", self.size())
         self.settings.setValue("pos", self.pos())
+        self.settings.setValue("advanced_settings", json.dumps(self.advanced_settings))
 
     def _get_icon(self):
         """Obtém o ícone de forma compatível com PyInstaller"""
@@ -2807,11 +3416,33 @@ class DownloaderGUI(QMainWindow):
     
     def browse_file(self):
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Salvar como...", "", "Todos os arquivos (*.*)"
+            self, "Salvar como...", "", 
+            "Vídeo Transport Stream (*.ts);;Vídeo MP4 (*.mp4);;Vídeo MKV (*.mkv);;Todos os arquivos (*.*)"
         )
         if file_path:
             self.output_input.setText(file_path)
             
+    def _validate_checksum(self, text):
+        """Valida o formato do hash SHA256 em tempo real"""
+        import re
+        if not text.strip():
+            self.checksum_status.setText("")
+            self.checksum_status.setStyleSheet("font-size: 11px; color: #666666;")
+            return
+
+        # SHA256 deve ter exatamente 64 caracteres hexadecimais
+        if re.match(r'^[a-fA-F0-9]{64}$', text):
+            self.checksum_status.setText("✓ Válido")
+            self.checksum_status.setStyleSheet("font-size: 11px; color: #7a9a7a; font-weight: bold;")
+        else:
+            if len(text) > 64:
+                self.checksum_status.setText("✗ Muito longo")
+            elif len(text) < 64 and text:
+                self.checksum_status.setText(f"✗ {64 - len(text)} restantes")
+            else:
+                self.checksum_status.setText("✗ Inválido")
+            self.checksum_status.setStyleSheet("font-size: 11px; color: #9a7a7a; font-weight: bold;")
+
     def _ensure_file_extension(self, filepath, url):
         """Garante que o nome do arquivo tenha extensão, usando a extensão da URL se necessário"""
         if not filepath:
@@ -2827,11 +3458,19 @@ class DownloaderGUI(QMainWindow):
         
         # Tentar obter extensão da URL
         parsed = urlparse(url)
-        url_path = parsed.path
+        url_path = parsed.path.lower()
         url_ext = os.path.splitext(url_path)[1]
         
-        # Se a URL tem extensão, adicionar ao nome do arquivo
+        # Se for HLS (M3U8), usamos .ts para evitar travamentos de busca
+        if ".m3u8" in url_path or "master" in url_path or "playlist" in url_path:
+            url_ext = ".ts"
+        
+        # Se a URL ou fluxo tem extensão identificada, adicionar ao nome do arquivo
         if url_ext:
+            # Caso a extensão da URL seja .m3u8 ou .txt para um fluxo de vídeo, forçamos .ts
+            if url_ext in [".m3u8", ".txt"] and (".m3u8" in url or "playlist" in url):
+                url_ext = ".ts"
+            
             new_filename = filename + url_ext
             if directory:
                 return os.path.join(directory, new_filename)
@@ -2841,10 +3480,23 @@ class DownloaderGUI(QMainWindow):
         return filepath
     
     def start_download(self):
-        url = self.url_input.text().strip()
-        if not url:
+        raw_input = self.url_input.text().strip()
+        if not raw_input:
             QMessageBox.warning(self, "Aviso", "Por favor, insira uma URL válida!")
             return
+            
+        url = raw_input
+        custom_headers = None
+        
+        # Detect if it's JSON from Chrome Extension Interceptor
+        try:
+            if raw_input.startswith('{') and '"url"' in raw_input:
+                payload = json.loads(raw_input)
+                url = payload.get('url', raw_input)
+                custom_headers = payload.get('headers', None)
+                self.add_log("Payload do Interceptor HLS detectado!", "success")
+        except json.JSONDecodeError:
+            pass
             
         output_path_raw = self.output_input.text().strip() or None
         # Garantir que o nome do arquivo tenha extensão se necessário
@@ -2879,9 +3531,10 @@ class DownloaderGUI(QMainWindow):
         # Usar configurações avançadas
         proxy = self.advanced_settings.get('proxy')
         auth = self.advanced_settings.get('auth')
-        checksum = self.advanced_settings.get('checksum')
+        checksum = self.checksum_input.text().strip() or None
         connect_timeout = self.advanced_settings.get('connect_timeout', 10)
         read_timeout = self.advanced_settings.get('read_timeout', 30)
+        x3d_opt = self.advanced_settings.get('x3d_opt', False)
         
         # Converter proxy string para dict se necessário
         proxy_dict = None
@@ -2893,7 +3546,8 @@ class DownloaderGUI(QMainWindow):
         
         self.download_worker = DownloadWorker(
             url, output_path, threads, checksum, proxy_dict, auth, 
-            auto_detect_quality, connect_timeout, read_timeout
+            auto_detect_quality, connect_timeout, read_timeout,
+            custom_headers=custom_headers, x3d_opt=x3d_opt
         )
         self.download_worker.progress_signal.connect(self.update_progress)
         self.download_worker.log_signal.connect(self.add_log)
@@ -3013,6 +3667,7 @@ class DownloaderGUI(QMainWindow):
         self.pause_btn.setEnabled(False)
         self.pause_btn.setText("Pausar")
         self.stop_btn.setEnabled(False)
+        self.checksum_input.clear()
         
         if success:
             self.progress_bar.setValue(100)
@@ -3068,7 +3723,7 @@ class DownloaderGUI(QMainWindow):
             
             # Arquivo
             filename = entry.get('filename', 'Desconhecido')
-            self.history_table.setItem(row, 1, QTableWidgetItem(filename))
+            self.history_table.setItem(row, 2, QTableWidgetItem(filename))
             
             # Tamanho
             size = entry.get('size', 0)
@@ -3080,7 +3735,7 @@ class DownloaderGUI(QMainWindow):
                     size_str = f"{size_mb:.2f} MB"
             else:
                 size_str = "Desconhecido"
-            self.history_table.setItem(row, 2, QTableWidgetItem(size_str))
+            self.history_table.setItem(row, 3, QTableWidgetItem(size_str))
             
             # Duração
             duration = entry.get('duration', 0)
@@ -3095,7 +3750,7 @@ class DownloaderGUI(QMainWindow):
                     duration_str = f"{hours}h {minutes}m"
             else:
                 duration_str = "--"
-            self.history_table.setItem(row, 3, QTableWidgetItem(duration_str))
+            self.history_table.setItem(row, 4, QTableWidgetItem(duration_str))
             
             # Status
             success = entry.get('success', False)
