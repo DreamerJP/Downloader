@@ -3001,7 +3001,7 @@ class DownloaderGUI(QMainWindow):
         checksum_layout = QHBoxLayout()
         checksum_layout.addWidget(QLabel("Verificar (SHA256):"))
         self.checksum_input = QLineEdit()
-        self.checksum_input.setPlaceholderText("Cole o hash SHA256 após o download (Opcional)")
+        self.checksum_input.setPlaceholderText("Cole o hash SHA256 para verificação automática (Opcional)")
         self.checksum_input.textChanged.connect(self._validate_checksum)
         checksum_layout.addWidget(self.checksum_input)
         
