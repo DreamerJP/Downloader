@@ -1,16 +1,13 @@
 {
-    "version": "1.6",
-    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v1.6/Downloader.exe",
+    "version": "1.7",
+    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v1.7/Downloader.exe",
     "changelog": [
-        "Suporte a streams HLS/M3U8: download paralelo de segmentos .ts com montagem automática",
-        "Suporte a criptografia AES-128 em streams HLS (descriptografia automática por segmento)",
-        "Suporte a Master Playlist M3U8: seleção automática da resolução máxima disponível",
-        "Headers HTTP customizados por download (User-Agent, Referer, Cookie e outros)",
-        "Otimização X3D: chunks de 32MB para CPUs com cache L3 3D (AMD X3D e similares)",
-        "Instalação automática da extensão Chrome via registro do Windows (nova aba na interface)",
-        "Extensão Chrome agora empacotada dentro do executável para distribuição integrada",
-        "Buffer adaptativo de chunks: ajuste dinâmico entre 256KB e 32MB conforme o arquivo",
-        "Correção: validação de checksum SHA256 movida para posição correta na interface",
-        "Correções gerais de bugs e melhorias de estabilidade"
+        "Melhoria na integridade de arquivos de vídeo HLS (evita stuttering ao realizar busca/seek)",
+        "Otimização no empacotamento de segmentos TS para garantir compatibilidade com players de vídeo",
+        "Ajuste automático de extensão do arquivo para fluxos M3U8 (força .ts para evitar erros)",
+        "Melhoria na captura de links: limpeza automática ao trocar de aba",
+        "Interface: Ajustes no dimensionamento do gráfico de velocidade e janelas de configurações",
+        "Sistema de Atualização: Maior robustez na finalização de processos antigos durante o update",
+        "Correções gerais em diálogos de erro e validações de nomes de arquivos"
     ]
 }

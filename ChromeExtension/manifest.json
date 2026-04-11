@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "DreamerJP Advanced Interceptor",
+  "name": "Downloader Extension",
   "version": "3.0",
-  "description": "Interceptação stealth de streams (M3U8, MPD, MP4, TS) via Proxy nativo no contexto da página. Bypassa CSP e detecção de extensão.",
+  "description": "Captura de links de streams (M3U8, MPD, MP4, TS) para o gerenciador de downloads.",
   "permissions": [
     "webRequest",
     "storage",
@@ -18,18 +18,26 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "DreamerJP Interceptor"
+    "default_title": "Downloader Extension"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["injected.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "injected.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start"
     }
   ]

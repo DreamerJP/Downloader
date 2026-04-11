@@ -1,11 +1,11 @@
 # Downloader
 
-Acelerador de downloads multi-thread com suporte a HLS/M3U8, interface gráfica avançada e extensão integrada para o Chrome.
+Gerenciador de downloads multithread com suporte a HLS/M3U8 e extensão integrada para o Chrome.
 
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-6.5+-41CD52.svg?style=flat&logo=qt&logoColor=white)](https://www.qt.io)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.6-red.svg?style=flat)](https://github.com/DreamerJP/Downloader/releases)
+[![Version](https://img.shields.io/badge/version-1.7-red.svg?style=flat)](https://github.com/DreamerJP/Downloader/releases)
 
 ---
 
@@ -27,11 +27,13 @@ Ferramenta de download desenvolvida em Python com interface PyQt6, capaz de baix
 ### 🎬 Suporte a Streams HLS/M3U8
 - Parser completo de **Master Playlist** com seleção automática da resolução máxima
 - Download paralelo de segmentos `.ts` com montagem sequencial automática
+- Empacotamento otimizado para compatibilidade total de busca (Seek/Rewind)
 - Suporte a **criptografia AES-128** — descriptografia automática por segmento
 - Fallback inteligente em caso de segmentos com falha
 
-### 🧩 Extensão do Chrome — DreamerJP Advanced Interceptor
+### 🧩 Extensão do Chrome
 - Captura links de vídeo (M3U8, MP4, TS, MPD) enquanto você assiste no browser
+- Limpeza automática de links capturados ao trocar de aba no navegador
 - Instalação com **um clique** diretamente pelo app (via registro do Windows)
 - Desinstalação limpa também pela interface
 - Sem necessidade de publicar na Chrome Web Store
@@ -138,7 +140,7 @@ pip install pyinstaller
 pyinstaller Downloader.spec
 ```
 
-> O `Downloader.spec` já está configurado com todos os `hiddenimports` necessários (`m3u8`, `Crypto`, `matplotlib` backend Qt6) e inclui a pasta `ChromeExtension` automaticamente no bundle.
+> O `Downloader.spec` está configurado com as dependências necessárias e inclui a pasta `ChromeExtension` automaticamente no pacote.
 
 ---
 
@@ -146,8 +148,8 @@ pyinstaller Downloader.spec
 
 | Classe | Responsabilidade |
 |--------|-----------------|
-| `DownloadWorker` | Engine de download: multi-thread, HLS, AES, merge |
-| `ChromeExtensionInstaller` | Instalação/remoção da extensão via registro do Windows |
+| `DownloadWorker` | Motor de download: multithread, HLS, AES, união |
+| `ChromeExtensionInstaller` | Instalação/remoção da extensão para navegador |
 | `Updater` | Verificação e instalação de novas versões |
 | `SpeedCalculator` | Métricas de velocidade com média móvel |
 | `DownloadHistory` | Histórico persistente em JSON |

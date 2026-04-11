@@ -12,6 +12,7 @@ import tempfile
 import subprocess
 import shutil
 import re
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from datetime import datetime
@@ -89,16 +90,10 @@ from PyQt6.QtWidgets import (
     QHeaderView, QTabWidget, QComboBox, QCheckBox, QMenuBar, QMenu, QDialog,
     QDialogButtonBox, QFormLayout
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QSettings, QSize
-from PyQt6.QtGui import QFont, QColor, QIcon
-
-# Imports para gráficos matplotlib
-import matplotlib
-matplotlib.use('QtAgg')
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
-import numpy as np
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QSettings, QSize, QPointF, QRectF
+from PyQt6.QtGui import (
+    QFont, QColor, QIcon, QPainter, QPainterPath, QPen, QLinearGradient
+)
 
 # Configurações de chunk size
 CHUNK_SIZE = 1024 * 1024 * 2  # 2MB por leitura
@@ -311,138 +306,270 @@ exit /b 0
         return bat_path
 
 class SpeedCalculator:
-    """Calcula velocidade de download com média móvel e métricas avançadas"""
-    def __init__(self, window_size=20):
-        self.samples = []
-        self.window_size = window_size
-        self.last_time = time.time()
-        self.last_bytes = 0
-        self.peak_speed = 0
-        self.total_samples = 0
-        
-        self.time_history = []
-        self.bytes_history = []
-        
-        
-        self.total_bytes_downloaded = 0
-        self.total_time_elapsed = 0
+    """Telemetria baseada em eventos reais de transferência."""
+
+    def __init__(self, current_window=1.6, chart_interval=0.25, chart_history_seconds=180):
+        self.current_window = current_window
+        self.chart_interval = chart_interval
+        self.chart_history_seconds = chart_history_seconds
+        self.reset()
+
+    def reset(self):
+        self.byte_events = deque()
+        self.chart_points = deque()
         self.start_timestamp = None
         self.end_timestamp = None
+        self.last_chart_sample_at = None
+        self.completed_bytes = 0
+        self.measured_bytes = 0
+        self.peak_speed = 0.0
+        self.progress_mode = "bytes"
+        self.total_bytes_target = 0
+        self.total_segments = 0
+        self.completed_segments = 0
+        self.measured_segments = 0
+
+    def set_total_bytes(self, total_bytes):
+        self.progress_mode = "bytes"
+        self.total_bytes_target = max(int(total_bytes or 0), 0)
+        self.total_segments = 0
+        self.completed_segments = 0
+        self.measured_segments = 0
+
+    def set_total_segments(self, total_segments):
+        self.progress_mode = "segments"
+        self.total_segments = max(int(total_segments or 0), 0)
+        self.total_bytes_target = 0
+        self.completed_segments = 0
+        self.measured_segments = 0
+
+    def record_progress(self, delta_bytes=0, delta_segments=0, count_speed=True, timestamp=None):
+        now = timestamp if timestamp is not None else time.perf_counter()
+
+        delta_bytes = int(delta_bytes or 0)
+        delta_segments = int(delta_segments or 0)
+
+        if delta_bytes:
+            self.completed_bytes = max(0, self.completed_bytes + delta_bytes)
+
+        if count_speed and (delta_bytes or delta_segments):
+            if self.start_timestamp is None:
+                self.start_timestamp = now
+                self.last_chart_sample_at = now
+                self.chart_points.append((0.0, 0.0))
+
+            if delta_bytes:
+                self.measured_bytes = max(0, self.measured_bytes + delta_bytes)
+                self.byte_events.append((now, delta_bytes))
+
+        if delta_segments:
+            self.completed_segments = max(0, self.completed_segments + delta_segments)
+            if count_speed:
+                self.measured_segments = max(0, self.measured_segments + delta_segments)
+
+        self._trim_byte_events(now)
 
     def add_sample(self, total_bytes):
-        now = time.time()
+        delta = int(total_bytes) - self.completed_bytes
+        self.record_progress(delta_bytes=delta)
 
-        # Sempre registrar o ponto atual no histórico
-        self.time_history.append(now)
-        self.bytes_history.append(total_bytes)
+    def stop_tracking(self):
+        if self.start_timestamp is None or self.end_timestamp is not None:
+            return
 
-        # Manter apenas os últimos 50 pontos para cálculo preciso
-        max_history = 50
-        if len(self.time_history) > max_history:
-            self.time_history.pop(0)
-            self.bytes_history.pop(0)
-
-        # Calcular velocidade baseada nos últimos 5 pontos (últimos ~0.5s)
-        min_points_for_calc = 5
-        if len(self.time_history) >= min_points_for_calc:
-            # Usar os últimos pontos para calcular velocidade média
-            recent_times = self.time_history[-min_points_for_calc:]
-            recent_bytes = self.bytes_history[-min_points_for_calc:]
-
-            # Calcular velocidade entre pontos consecutivos
-            instant_speeds = []
-            for i in range(1, len(recent_times)):
-                time_diff = recent_times[i] - recent_times[i-1]
-                bytes_diff = recent_bytes[i] - recent_bytes[i-1]
-
-                if time_diff > 0.1:  # Evitar divisões por zero (100ms mínimo)
-                    instant_speed = bytes_diff / time_diff
-                    if instant_speed >= 0:  # Apenas velocidades positivas
-                        instant_speeds.append(instant_speed)
-
-            # Velocidade atual é a média das velocidades instantâneas recentes
-            if instant_speeds:
-                current_speed = sum(instant_speeds) / len(instant_speeds)
-                
-                self.samples.append(current_speed)
-                self.total_samples += 1
-                self.peak_speed = max(self.peak_speed, current_speed)
-                
-                self.total_bytes_downloaded = total_bytes
-                if self.start_timestamp is None:
-                    self.start_timestamp = self.time_history[0]
-                self.total_time_elapsed = now - self.start_timestamp
-
-                if len(self.samples) > self.window_size:
-                    self.samples.pop(0)
+        end_time = time.perf_counter()
+        self._sample_chart_until(end_time)
+        self.end_timestamp = end_time
 
     def get_speed(self):
-        if not self.samples:
-            return 0
-        return sum(self.samples) / len(self.samples)
+        if self.start_timestamp is None:
+            return 0.0
+
+        if self.end_timestamp is not None:
+            return 0.0
+
+        now = time.perf_counter()
+        self._sample_chart_until(now)
+        current_speed = self._current_speed_at(now)
+        self.peak_speed = max(self.peak_speed, current_speed)
+        return current_speed
 
     def get_average_speed(self):
-        """Velocidade média geral baseada em todo o histórico"""
-        if self.total_time_elapsed == 0:
-            return 0
-        return self.total_bytes_downloaded / self.total_time_elapsed
+        if self.start_timestamp is None:
+            return 0.0
+
+        now = self.end_timestamp if self.end_timestamp is not None else time.perf_counter()
+        duration = max(now - self.start_timestamp, 0.0)
+        if duration <= 0:
+            return 0.0
+        return self.measured_bytes / duration
 
     def get_peak_speed(self):
         return self.peak_speed
 
-    def get_eta(self, downloaded, total):
-        speed = self.get_speed()
-        if speed == 0 or total == 0:
-            return "Calculando..."
-        
-        remaining = total - downloaded
-        seconds = remaining / speed
-        
-        if seconds < 0:
-            return "Finalizando..."
-        elif seconds < 60:
-            return f"{int(seconds)}s"
-        elif seconds < 3600:
-            return f"{int(seconds/60)}m {int(seconds%60)}s"
-        else:
-            hours = int(seconds / 3600)
-            minutes = int((seconds % 3600) / 60)
-            return f"{hours}h {minutes}m"
+    def get_eta(self, downloaded=None, total=None):
+        now = self.end_timestamp if self.end_timestamp is not None else time.perf_counter()
+        eta_seconds = self._get_eta_seconds(now, total_override=total)
+        return self._format_eta(eta_seconds)
 
-    def reset(self):
-        """Reinicia o calculador para novo download"""
-        self.samples = []
-        self.time_history = []
-        self.bytes_history = []
-        self.last_time = time.time()
-        self.last_bytes = 0
-        self.peak_speed = 0
-        self.total_samples = 0
-        
-        self.total_bytes_downloaded = 0
-        self.total_time_elapsed = 0
-        self.start_timestamp = None
-        self.end_timestamp = None
+    def get_progress_ratio(self):
+        if self.progress_mode == "segments":
+            if self.total_segments <= 0:
+                return None
+            return min(max(self.completed_segments / self.total_segments, 0.0), 1.0)
 
-    def stop_tracking(self):
-        """Para a contagem de tempo para fixar a média final"""
-        if self.start_timestamp and self.end_timestamp is None:
-            self.end_timestamp = time.time()
-            self.total_time_elapsed = self.end_timestamp - self.start_timestamp
+        if self.total_bytes_target <= 0:
+            return None
+        return min(max(self.completed_bytes / self.total_bytes_target, 0.0), 1.0)
 
-    def get_average_speed(self):
-        """Velocidade média geral baseada em todo o histórico"""
+    def get_chart_points(self, window_seconds=120, max_points=240):
+        if not self.chart_points:
+            return []
+
+        points = list(self.chart_points)
+        latest_time = points[-1][0]
+        min_time = max(0.0, latest_time - window_seconds)
+        visible_points = [(t, s) for t, s in points if t >= min_time]
+
+        if len(visible_points) <= max_points:
+            return visible_points
+
+        step = max(1, math.ceil(len(visible_points) / max_points))
+        reduced = visible_points[::step]
+        if reduced[-1] != visible_points[-1]:
+            reduced.append(visible_points[-1])
+        return reduced
+
+    def get_snapshot(self):
         if self.start_timestamp is None:
-            return 0
-            
-        if self.end_timestamp:
-            duration = self.total_time_elapsed
-        else:
-            duration = time.time() - self.start_timestamp
+            return {
+                "current_speed": 0.0,
+                "average_speed": 0.0,
+                "peak_speed": 0.0,
+                "eta": "--",
+                "progress_ratio": self.get_progress_ratio(),
+                "downloaded_bytes": self.completed_bytes,
+                "completed_segments": self.completed_segments,
+                "total_segments": self.total_segments,
+                "chart_points": [],
+            }
 
-        if duration == 0:
+        now = self.end_timestamp if self.end_timestamp is not None else time.perf_counter()
+        self._sample_chart_until(now)
+        current_speed = 0.0 if self.end_timestamp is not None else self._current_speed_at(now)
+        avg_speed = self.get_average_speed()
+        self.peak_speed = max(self.peak_speed, current_speed)
+
+        return {
+            "current_speed": current_speed,
+            "average_speed": avg_speed,
+            "peak_speed": self.peak_speed,
+            "eta": self._format_eta(self._get_eta_seconds(now)),
+            "progress_ratio": self.get_progress_ratio(),
+            "downloaded_bytes": self.completed_bytes,
+            "completed_segments": self.completed_segments,
+            "total_segments": self.total_segments,
+            "chart_points": self.get_chart_points(),
+        }
+
+    def _trim_byte_events(self, now):
+        keep_window = max(self.current_window * 4, 8.0)
+        while self.byte_events and now - self.byte_events[0][0] > keep_window:
+            self.byte_events.popleft()
+
+    def _current_speed_at(self, now):
+        if self.start_timestamp is None:
+            return 0.0
+
+        self._trim_byte_events(now)
+        elapsed = max(now - self.start_timestamp, 0.0)
+        window = min(self.current_window, elapsed)
+        if window <= 0:
+            return 0.0
+
+        byte_total = 0
+        for event_time, delta_bytes in self.byte_events:
+            if now - event_time <= self.current_window:
+                byte_total += delta_bytes
+
+        return max(byte_total / max(window, 0.25), 0.0)
+
+    def _sample_chart_until(self, now):
+        if self.start_timestamp is None:
+            return
+
+        if self.last_chart_sample_at is None:
+            self.last_chart_sample_at = self.start_timestamp
+
+        while self.last_chart_sample_at + self.chart_interval <= now:
+            self.last_chart_sample_at += self.chart_interval
+            elapsed = max(self.last_chart_sample_at - self.start_timestamp, 0.0)
+            sample_speed = self._current_speed_at(self.last_chart_sample_at)
+            self.chart_points.append((elapsed, sample_speed))
+            self.peak_speed = max(self.peak_speed, sample_speed)
+
+        if self.chart_points:
+            latest_time = self.chart_points[-1][0]
+            cutoff = max(0.0, latest_time - self.chart_history_seconds)
+            while len(self.chart_points) > 1 and self.chart_points[1][0] < cutoff:
+                self.chart_points.popleft()
+
+    def _get_eta_seconds(self, now, total_override=None):
+        if self.start_timestamp is None:
+            return None
+
+        elapsed = max(now - self.start_timestamp, 0.0)
+        if elapsed <= 0:
+            return None
+
+        if self.progress_mode == "segments":
+            if self.total_segments <= 0 or self.completed_segments <= 0 or self.measured_segments <= 0:
+                return None
+
+            remaining_segments = max(self.total_segments - self.completed_segments, 0)
+            if remaining_segments == 0:
+                return 0
+
+            segment_rate = self.measured_segments / elapsed
+            if segment_rate <= 0:
+                return None
+
+            return remaining_segments / segment_rate
+
+        total_bytes = self.total_bytes_target
+        if total_override is not None:
+            total_bytes = max(int(total_override or 0), 0)
+
+        if total_bytes <= 0:
+            return None
+
+        remaining_bytes = max(total_bytes - self.completed_bytes, 0)
+        if remaining_bytes == 0:
             return 0
-        return self.total_bytes_downloaded / duration
+
+        current_speed = self._current_speed_at(now)
+        avg_speed = self.get_average_speed()
+        effective_speed = max((current_speed * 0.75) + (avg_speed * 0.25), avg_speed * 0.35)
+
+        if effective_speed <= 0:
+            return None
+
+        return remaining_bytes / effective_speed
+
+    def _format_eta(self, seconds):
+        if seconds is None:
+            return "--"
+        if seconds <= 0:
+            return "0s"
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        if seconds < 3600:
+            minutes = int(seconds // 60)
+            remaining_seconds = int(seconds % 60)
+            return f"{minutes}m {remaining_seconds}s"
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{hours}h {minutes}m"
 
 class DownloadHistory:
     """Gerencia histórico de downloads"""
@@ -526,7 +653,7 @@ class DownloadWorker(QThread):
 
         # Headers HTTP (Padrao, sobrescrito pelos custom headers caso enviados)
         initial_headers = {
-            "User-Agent": "PyDownloadAccelerator/1.6-Optimized",
+            "User-Agent": "Downloader/1.7",
             "Accept": "*/*",
             "Accept-Encoding": "gzip, deflate, br",  # Suporte a compressão
             "Connection": "keep-alive",
@@ -962,7 +1089,7 @@ class DownloadWorker(QThread):
                         if existing > 0:
                             with self.lock:
                                 self.downloaded_bytes -= existing
-                                self.progress_signal.emit(-existing)
+                                self.progress_signal.emit({"bytes": -existing, "count_speed": False})
                             existing = 0
 
                     bytes_downloaded_this_attempt = 0
@@ -1265,7 +1392,7 @@ class DownloadWorker(QThread):
                         # Nota: Em retries subsequentes, existing já estará atualizado
                         if attempt == 0: # Apenas notificar progresso inicial na primeira tentativa
                              self.downloaded_bytes = existing
-                             self.progress_signal.emit(existing)
+                             self.progress_signal.emit({"bytes": existing, "count_speed": False})
 
                 r = self.session.get(url, headers=headers, stream=True,
                                     allow_redirects=True, timeout=(self.connect_timeout, self.read_timeout))
@@ -1299,7 +1426,7 @@ class DownloadWorker(QThread):
                         self.log_signal.emit("Reiniciando download (servidor não aceitou resume)...", "warning")
                         with self.lock:
                            self.downloaded_bytes -= existing
-                           self.progress_signal.emit(-existing)
+                           self.progress_signal.emit({"bytes": -existing, "count_speed": False})
                         existing = 0
                 
                 bytes_downloaded_this_session = 0
@@ -1413,12 +1540,17 @@ class DownloadWorker(QThread):
             for i, seg in enumerate(segments):
                 parts.append((i, seg.absolute_uri))
                 
-            self.total_size_signal.emit(0) # HLS não tem tamanho preemptivo garantido facilmente
+            self.total_size_signal.emit({
+                "mode": "segments",
+                "total": len(segments)
+            })
             
             # Configuração do Download de M3U8
             completed = 0
+            completed_successfully = 0
             failed_parts = []
-            downloaded_bytes_session = 0
+            # Obter a sequência base para o IV (importante para descriptografia correta)
+            base_sequence = getattr(playlist, 'media_sequence', 0) or 0
             
             # Download chunks - limitação de workers pra não crashar a thread_pool
             with ThreadPoolExecutor(max_workers=min(int(self.threads), 256), thread_name_prefix="HLS") as executor:
@@ -1426,7 +1558,8 @@ class DownloadWorker(QThread):
                 for idx, (i, seg_url) in enumerate(parts):
                     ppath = os.path.join(part_dir, f"segment_{i}.ts")
                     key_info = playlist.keys[0] if (hasattr(playlist, 'keys') and playlist.keys and key) else None
-                    future = executor.submit(self._download_segment_worker, seg_url, ppath, i, key, key_info)
+                    # Passamos o número de sequência correto (base + i)
+                    future = executor.submit(self._download_segment_worker, seg_url, ppath, i, key, key_info, base_sequence)
                     futures[future] = i
                     
                 last_progress_log = 0
@@ -1436,47 +1569,91 @@ class DownloadWorker(QThread):
                     part_idx = futures[future]
                     completed += 1
                     
-                    success, size = future.result()
+                    success, size, counted_in_worker = future.result()
                     if not success:
                          failed_parts.append(part_idx)
                     else:
-                         downloaded_bytes_session += size
-                         with self.lock:
-                             self.downloaded_bytes += size
-                             self.progress_signal.emit(size)
+                         completed_successfully += 1
+                         progress_payload = {"segments": 1}
+                         if not counted_in_worker and size > 0:
+                             with self.lock:
+                                 self.downloaded_bytes += size
+                             progress_payload["bytes"] = size
+                             progress_payload["count_speed"] = False
+                         self.progress_signal.emit(progress_payload)
                              
-                    current_progress_pct = int((completed / len(parts)) * 100)
+                    current_progress_pct = int((completed_successfully / len(parts)) * 100)
                     if current_progress_pct >= last_progress_log + 10 or completed == 1:
-                        self.log_signal.emit(f"Peças baixadas: {completed}/{len(parts)} ({current_progress_pct}%)", "info")
+                        self.log_signal.emit(
+                            f"Peças obtidas: {completed_successfully}/{len(parts)} ({current_progress_pct}%)",
+                            "info"
+                        )
                         last_progress_log = current_progress_pct
                         
             if self.should_stop:
                 self.log_signal.emit("Download HLS cancelado.", "warning")
                 return False
                 
-            if failed_parts:
-                self.log_signal.emit(f"Falha ao baixar {len(failed_parts)} peças. Video ficará corrompido.", "error")
-                return False
+            # Repescagem: Tentar baixar novamente as partes que falharam (com menos threads para evitar bloqueios)
+            if failed_parts and not self.should_stop:
+                self.log_signal.emit(f"🔄 Iniciando repescagem de {len(failed_parts)} peças que falharam...", "warning")
+                retry_parts = [p for p in parts if p[0] in failed_parts]
+                failed_parts = [] # Limpa a lista para re-verificar
                 
-            self.log_signal.emit("Todas as peças baixadas! Unindo fluxo de vídeo (Merge)...", "info")
+                # Usamos um número menor de workers (máximo 32) para a repescagem ser mais "gentil" com o servidor
+                with ThreadPoolExecutor(max_workers=min(len(retry_parts), 32), thread_name_prefix="HLS-Retry") as executor:
+                    retry_futures = {}
+                    for i, seg_url in retry_parts:
+                        ppath = os.path.join(part_dir, f"segment_{i}.ts")
+                        key_info = playlist.keys[0] if (hasattr(playlist, 'keys') and playlist.keys and key) else None
+                        future = executor.submit(self._download_segment_worker, seg_url, ppath, i, key, key_info, base_sequence)
+                        retry_futures[future] = i
+                        
+                    for future in as_completed(retry_futures):
+                        if self.should_stop: break
+                        part_idx = retry_futures[future]
+                        success, size, counted_in_worker = future.result()
+                        if not success:
+                            failed_parts.append(part_idx)
+                        else:
+                            completed_successfully += 1
+                            progress_payload = {"segments": 1}
+                            if not counted_in_worker and size > 0:
+                                with self.lock:
+                                    self.downloaded_bytes += size
+                                progress_payload["bytes"] = size
+                                progress_payload["count_speed"] = False
+                            self.progress_signal.emit(progress_payload)
+                
+                if not failed_parts:
+                    self.log_signal.emit("✨ Repescagem concluída com sucesso! Todas as peças foram obtidas.", "success")
+
+            if failed_parts:
+                self.log_signal.emit(f"Aviso: {len(failed_parts)} peças falharam permanentemente. Unindo o que foi possível...", "error")
+            else:
+                self.log_signal.emit("Todas as peças baixadas! Unindo fluxo de vídeo (Merge)...", "info")
             if hasattr(self, 'speed_calc') and self.speed_calc:
                 self.speed_calc.stop_tracking()
             
             # Realizar o Merge em ordem sequencial
-            with open(output_path, "wb") as outf:
-                for i, _ in parts:
-                    ppath = os.path.join(part_dir, f"segment_{i}.ts")
-                    if os.path.exists(ppath):
-                        with open(ppath, "rb") as pf:
-                            outf.write(pf.read())
+            try:
+                with open(output_path, "wb") as outf:
+                    for i, _ in parts:
+                        ppath = os.path.join(part_dir, f"segment_{i}.ts")
+                        if os.path.exists(ppath):
+                            with open(ppath, "rb") as pf:
+                                # Buffer de 64MB
+                                shutil.copyfileobj(pf, outf, length=1024*1024*64)
+                
+                self.log_signal.emit("Unificação concluída com sucesso!", "success")
+            except Exception as e:
+                self.log_signal.emit(f"Erro durante a unificação dos arquivos: {e}", "error")
+                return False
                         
-            # Ajustar extensão para .ts (Transport Stream) que é a correta para HLS concatenado sem FFmpeg
-            # Isso evita travamentos na linha do tempo (seek issues) por falta de índice MP4
+            # Ajustar extensão para .ts
             if not output_path.lower().endswith(".ts"):
                 base = os.path.splitext(output_path)[0]
                 new_path = base + ".ts"
-                
-                # Se o arquivo já existe, remove anterior
                 if os.path.exists(new_path):
                     try: os.remove(new_path)
                     except: pass
@@ -1484,69 +1661,163 @@ class DownloadWorker(QThread):
                 try:
                     os.rename(output_path, new_path)
                     self.output_path = new_path
-                    self.log_signal.emit("Extensão ajustada para .ts para garantir fluidez na linha do tempo.", "info")
                 except Exception as e:
                     self.log_signal.emit(f"Aviso: Não foi possível renomear para .ts: {e}", "warning")
             
+            # Pequena pausa para o Windows liberar os arquivos antes da limpeza (evita crash de acesso)
+            time.sleep(0.5)
             self.log_signal.emit("Limpando arquivos temporários M3U8...", "info")
-            for i, _ in parts:
-                try: os.remove(os.path.join(part_dir, f"segment_{i}.ts"))
-                except: pass
-            try: os.rmdir(part_dir)
-            except: pass
+            try:
+                shutil.rmtree(part_dir, ignore_errors=True)
+            except:
+                pass
             
             return True
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"DEBUG - Erro M3U8: {error_details}")
             self.log_signal.emit(f"Erro fatal no processamento M3U8/HLS: {e}", "error")
             return False
 
-    def _download_segment_worker(self, url, filepath, index, key=None, key_info=None):
+    def _emit_progress_delta(self, delta_bytes):
+        if not delta_bytes:
+            return
+
+        with self.lock:
+            self.downloaded_bytes = max(0, self.downloaded_bytes + delta_bytes)
+
+        self.progress_signal.emit(delta_bytes)
+
+    def _download_segment_worker(self, url, filepath, index, key=None, key_info=None, base_sequence=0):
         """Worker específico para baixar um segmento TS e decriptar se necessário."""
         headers = {}
         if hasattr(self, 'custom_headers') and self.custom_headers:
             headers = self.custom_headers
-            
+
+        hls_chunk_size = min(max(self.actual_chunk_size // 4, 64 * 1024), 512 * 1024)
         attempt = 0
+
         while attempt < RETRY_LIMIT and not self.should_stop:
             while self.should_pause and not self.should_stop:
                 time.sleep(0.1)
-                
+
+            reported_progress = 0
+            progress_accumulator = 0
+            last_progress_emit = time.time()
+
             try:
-                if os.path.exists(filepath):
-                    return (True, os.path.getsize(filepath))
-                    
-                r = self.session.get(url, headers=headers, timeout=(self.connect_timeout, self.read_timeout))
-                r.raise_for_status()
-                data = r.content
-                
-                # Decriptar
-                if key and key_info and 'AES' in sys.modules:
-                    iv = None
+                # Se o segmento já existe de uma execução anterior, reaproveitamos para não perder desempenho.
+                if os.path.exists(filepath) and not key:
+                    existing_size = os.path.getsize(filepath)
+                    if existing_size > 0:
+                        return (True, existing_size, False)
+
+                encrypted_buffer = bytearray() if (key and key_info and 'AES' in sys.modules) else None
+
+                with self.session.get(
+                    url,
+                    headers=headers,
+                    stream=True,
+                    timeout=(self.connect_timeout, self.read_timeout)
+                ) as r:
+                    r.raise_for_status()
+
+                    if encrypted_buffer is None:
+                        with open(filepath, "wb") as f:
+                            for chunk in r.iter_content(hls_chunk_size):
+                                if self.should_stop:
+                                    return (False, 0, True)
+
+                                while self.should_pause and not self.should_stop:
+                                    time.sleep(0.05)
+                                    if self.should_stop:
+                                        return (False, 0, True)
+
+                                if not chunk:
+                                    continue
+
+                                f.write(chunk)
+                                chunk_size = len(chunk)
+                                progress_accumulator += chunk_size
+
+                                now = time.time()
+                                if progress_accumulator >= 256 * 1024 or now - last_progress_emit >= 0.12:
+                                    self._emit_progress_delta(progress_accumulator)
+                                    reported_progress += progress_accumulator
+                                    progress_accumulator = 0
+                                    last_progress_emit = now
+                    else:
+                        for chunk in r.iter_content(hls_chunk_size):
+                            if self.should_stop:
+                                return (False, 0, True)
+
+                            while self.should_pause and not self.should_stop:
+                                time.sleep(0.05)
+                                if self.should_stop:
+                                    return (False, 0, True)
+
+                            if not chunk:
+                                continue
+
+                            encrypted_buffer.extend(chunk)
+                            chunk_size = len(chunk)
+                            progress_accumulator += chunk_size
+
+                            now = time.time()
+                            if progress_accumulator >= 256 * 1024 or now - last_progress_emit >= 0.12:
+                                self._emit_progress_delta(progress_accumulator)
+                                reported_progress += progress_accumulator
+                                progress_accumulator = 0
+                                last_progress_emit = now
+
+                if progress_accumulator > 0:
+                    self._emit_progress_delta(progress_accumulator)
+                    reported_progress += progress_accumulator
+
+                if encrypted_buffer is not None:
                     if hasattr(key_info, 'iv') and key_info.iv:
                         iv = bytes.fromhex(key_info.iv.replace('0x', ''))
                     else:
-                        seq = index
-                        # se a chave tiver propriedade sequence (geralmente nao tem no py m3u8 padrao)
-                        iv = seq.to_bytes(16, 'big')
-                        
+                        seq_num = base_sequence + index
+                        iv = seq_num.to_bytes(16, 'big')
+
                     cipher = AES.new(key, AES.MODE_CBC, iv)
-                    data = cipher.decrypt(data)
-                    
+                    data = cipher.decrypt(bytes(encrypted_buffer))
+
                     pad_len = data[-1]
                     if 0 < pad_len <= 16:
                         data = data[:-pad_len]
-                
-                with open(filepath, "wb") as f:
-                    f.write(data)
-                    
-                return (True, len(data))
-                
+
+                    with open(filepath, "wb") as f:
+                        f.write(data)
+
+                    final_size = len(data)
+                else:
+                    final_size = os.path.getsize(filepath)
+
+                adjustment = final_size - reported_progress
+                if adjustment:
+                    self._emit_progress_delta(adjustment)
+
+                return (True, final_size, True)
+
             except Exception:
+                if reported_progress:
+                    self._emit_progress_delta(-reported_progress)
+
+                try:
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                except Exception:
+                    pass
+
                 attempt += 1
                 if attempt == RETRY_LIMIT:
-                    return (False, 0)
+                    return (False, 0, True)
                 time.sleep(1)
-        return (False, 0)
+
+        return (False, 0, True)
 
     def run(self):
         # Sistema de Prioridade: Definir prioridade ALTA no Windows
@@ -1648,7 +1919,7 @@ class DownloadWorker(QThread):
                     if os.path.exists(ppath):
                         size = os.path.getsize(ppath)
                         self.downloaded_bytes += size
-                        self.progress_signal.emit(size)
+                        self.progress_signal.emit({"bytes": size, "count_speed": False})
 
                 self.log_signal.emit(f"Iniciando download com {optimal_threads} conexões ({len(parts)} partes, {part_size/(1024*1024):.1f}MB cada)...", "info")
 
@@ -1933,7 +2204,7 @@ class ChromeExtensionInstaller:
         return len(self.get_chrome_paths()) > 0
 
     def install(self):
-        """
+        r"""
         Copia os arquivos da extensão para %APPDATA%\DreamerJP\ChromeExtension.
 
         NOTA: O Chrome bloqueou instalação automática via registro para extensões
@@ -2016,12 +2287,12 @@ class AboutDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         
         # Título
-        title_label = QLabel("Acelerador de Downloads v1.6")
+        title_label = QLabel("Downloader v1.7")
         title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #e0e0e0; padding: 10px;")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)
         
-        subtitle_label = QLabel("Tecnologia de ponta para downloads ultra-rápidos")
+        subtitle_label = QLabel("Gerenciador de downloads multithread")
         subtitle_label.setStyleSheet("font-size: 12px; color: #b0b0b0; padding-bottom: 15px;")
         subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle_label)
@@ -2044,14 +2315,14 @@ class AboutDialog(QDialog):
         # Conteúdo HTML formatado
         content = """
         <h3 style="color: #8a9ba8; margin-top: 0;">⚡ CAPACIDADES PRINCIPAIS</h3>
-
+        
         <p><b>🔄 Download Paralelo Inteligente</b><br>
         • Até 512 conexões simultâneas por arquivo<br>
         • Divisão automática em partes otimizadas (256KB–32MB)<br>
         • Balanceamento inteligente de carga entre threads<br>
         • <span style="color: #7a9a7a;">Resultado: Até 23x mais velocidade</span></p>
 
-        <p><b>🚀 Merge Turbo (Tecnologia de Memória)</b><br>
+        <p><b>🚀 União em RAM (Buffer de Memória)</b><br>
         • Carregamento em RAM para arquivos até ~300MB<br>
         • União instantânea sem operações de disco<br>
         • Buffers de 64MB para I/O otimizado<br>
@@ -2060,8 +2331,9 @@ class AboutDialog(QDialog):
         <p><b>🎬 Suporte Completo a Streams HLS/M3U8</b><br>
         • Parser de Master Playlist com seleção automática da melhor resolução<br>
         • Download paralelo de segmentos .ts com montagem sequencial automática<br>
+        • Empacotamento otimizado para compatibilidade total de busca (Seek/Rewind)<br>
         • Suporte a criptografia AES-128 — descriptografia automática por segmento<br>
-        • <span style="color: #7a9a7a;">Resultado: Download de vídeos protegidos e segmentados</span></p>
+        • <span style="color: #7a9a7a;">Resultado: Download de vídeos protegidos e segmentados sem stuttering</span></p>
 
         <p><b>🔍 Detecção Automática de Qualidade</b><br>
         • Verificação inteligente de resoluções disponíveis<br>
@@ -2096,9 +2368,10 @@ class AboutDialog(QDialog):
 
         <p><b>🧩 Extensão do Chrome Integrada</b><br>
         • Captura links de vídeo (M3U8, MP4, TS, MPD) enquanto você navega<br>
+        • Limpeza automática de links capturados ao trocar de aba no navegador<br>
         • Instalação com um clique via registro do Windows (sem Chrome Web Store)<br>
         • Gerenciada diretamente pela aba "Extensão Chrome" neste app<br>
-        • <span style="color: #7a9a7a;">Resultado: Fluxo completo browser → downloader sem copiar links</span></p>
+        • <span style="color: #7a9a7a;">Resultado: Fluxo completo browser → downloader sem poluição de links antigos</span></p>
 
         <p><b>Interface Moderna</b><br>
         • Monitoramento em tempo real de velocidade, progresso e ETA<br>
@@ -2166,11 +2439,11 @@ class AboutDialog(QDialog):
             }
         """)
 
-class AdvancedSettingsDialog(QDialog):
-    """Diálogo para configurações avançadas"""
+class SettingsDialog(QDialog):
+    """Diálogo para configurações"""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Configurações Avançadas")
+        self.setWindowTitle("Configurações")
         self.setMinimumWidth(550)
         
         layout = QVBoxLayout(self)
@@ -2325,209 +2598,247 @@ class AdvancedSettingsDialog(QDialog):
             self.x3d_opt_cb.setChecked(settings['x3d_opt'])
 
 class SpeedChartWidget(QWidget):
-    """Widget personalizado para gráfico de velocidade de download em tempo real"""
+    """Widget leve em Qt para desenhar o histórico de velocidade."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        
-        plt.style.use('dark_background')
-        
-        self.figure = Figure(figsize=(8, 3), dpi=100, facecolor='#1a1a1a')
-        self.canvas = FigureCanvas(self.figure)
-        
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.canvas)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
         self.setMinimumHeight(200)
-        
+        self.visible_window_seconds = 120
         self.time_data = []
         self.speed_data = []
-        self.max_points = 1000
-        self.chart_peak_speed = 0
-        
-        self.last_chart_update = time.time()
-        self.chart_update_min_interval = 0.2  # 200ms mínimo
-        
-        self.setup_chart()
+        self.chart_peak_speed = 0.0
+        self.chart_avg_speed = 0.0
+        self.completion_time = None
 
-        # O gráfico será atualizado junto com a interface principal
-
-    def setup_chart(self):
-        """Configura o gráfico com estilo profissional"""
-        self.figure.clear()
-
-        # Criar subplot com fundo escuro
-        self.ax = self.figure.add_subplot(111, facecolor='#1f1f1f')
-
-        # Configurar cores do tema dark
-        self.ax.set_facecolor('#1f1f1f')
-        self.ax.grid(True, alpha=0.3, color='#444444', linestyle='--', linewidth=0.5)
-
-        # Configurar spines (bordas)
-        for spine in self.ax.spines.values():
-            spine.set_color('#555555')
-            spine.set_linewidth(0.5)
-
-        # Configurar ticks
-        self.ax.tick_params(colors='#cccccc', labelsize=8)
-        self.ax.xaxis.label.set_color('#cccccc')
-        self.ax.yaxis.label.set_color('#cccccc')
-
-        self.ax.set_ylabel('Velocidade (MB/s)', fontsize=9, color='#cccccc', fontweight='light')
-
-        # Linha inicial vazia
-        self.line, = self.ax.plot([], [], color='#4a9eff', linewidth=2,
-                                 marker='o', markersize=3, markerfacecolor='#4a9eff',
-                                 markeredgecolor='#4a9eff', alpha=0.8)
-
-        # Área preenchida sutil
-        self.fill = self.ax.fill_between([], [], [], color='#4a9eff', alpha=0.1)
-
-        # Configurar limites iniciais
-        self.ax.set_xlim(0, 60)
-        self.ax.set_ylim(0, 10)  # 10 MB/s inicial
-
-        # Forçar atualização do canvas
-        self.canvas.draw()
+    def set_history(self, points, average_speed=0.0, peak_speed=0.0):
+        self.time_data = [float(point[0]) for point in points]
+        self.speed_data = [float(point[1]) for point in points]
+        self.chart_avg_speed = float(average_speed or 0.0)
+        self.chart_peak_speed = float(peak_speed or 0.0)
+        self.update()
 
     def add_speed_point(self, speed_mbps):
-        """Adiciona um novo ponto de velocidade ao gráfico"""
-        current_time = time.time()
-
-        # Se é o primeiro ponto, inicializar start_time
-        if not hasattr(self, 'start_time'):
-            self.start_time = current_time
-
-        # Tempo relativo em segundos
-        relative_time = current_time - self.start_time
-
-        # Adicionar dados
-        self.time_data.append(relative_time)
-        self.speed_data.append(speed_mbps)
-
-        # Atualizar pico do gráfico
-        self.chart_peak_speed = max(self.chart_peak_speed, speed_mbps)
-
-        # Manter apenas os últimos max_points pontos
-        if len(self.time_data) > self.max_points:
-            self.time_data.pop(0)
-            self.speed_data.pop(0)
+        next_time = self.time_data[-1] + 0.25 if self.time_data else 0.0
+        self.time_data.append(next_time)
+        self.speed_data.append(float(speed_mbps) * 1024 * 1024)
+        self.chart_peak_speed = max(self.chart_peak_speed, self.speed_data[-1])
+        self.update()
 
     def update_chart(self):
-        """Atualiza a visualização do gráfico"""
-        if not self.time_data:
-            return
-        
-        now = time.time()
-        if now - self.last_chart_update < self.chart_update_min_interval:
-            return  # Pular atualização se muito recente
-        self.last_chart_update = now
-        
-        # Atualizar dados da linha
-        self.line.set_data(self.time_data, self.speed_data)
-
-        # Atualizar área preenchida
-        self.fill.remove()
-        self.fill = self.ax.fill_between(self.time_data, self.speed_data,
-                                       color='#4a9eff', alpha=0.1)
-
-        # Ajustar limites automaticamente
-        if self.time_data:
-            time_range = max(self.time_data) - min(self.time_data)
-            if time_range > 0:
-                self.ax.set_xlim(max(0, self.time_data[0]),
-                               max(self.time_data[-1], self.time_data[0] + 10))
-
-        if self.speed_data:
-            max_speed = max(self.speed_data)
-            if max_speed > 0:
-                # Ajustar limite Y para ser um pouco maior que o máximo
-                y_limit = max_speed * 1.2
-                # Mínimo de 10 MB/s para visualização
-                y_limit = max(y_limit, 10)
-                self.ax.set_ylim(0, y_limit)
-
-        # Redesenhar
-        self.canvas.draw_idle()
+        self.update()
 
     def update_chart_limits(self):
-        """Ajusta os limites do gráfico para mostrar todo o histórico disponível"""
-        if not self.time_data:
-            return
-
-        # Ajustar limite X para mostrar todo o tempo
-        time_min = min(self.time_data)
-        time_max = max(self.time_data)
-        time_range = time_max - time_min
-
-        # Adicionar margem de 10% no início e fim
-        margin = max(time_range * 0.1, 5)
-        self.ax.set_xlim(time_min - margin, time_max + margin)
-
-        # Ajustar limite Y baseado nos dados históricos
-        if self.speed_data:
-            speed_max = max(self.speed_data)
-            speed_min = min(self.speed_data)
-
-            # Adicionar margem superior de 20%
-            y_max = max(speed_max * 1.2, 10)
-            y_min = max(0, speed_min * 0.9)  # Não permitir valores negativos
-
-            self.ax.set_ylim(y_min, y_max)
-
-        self.canvas.draw_idle()
+        self.update()
 
     def mark_download_complete(self):
-        """Marca o ponto onde o download foi concluído"""
-        if not self.time_data:
-            return
-
-        # Adicionar linha vertical no ponto final
-        end_time = max(self.time_data)
-        end_speed = self.speed_data[-1]
-
-        # Remover linha anterior se existir
-        if hasattr(self, 'completion_line'):
-            try:
-                self.completion_line.remove()
-            except:
-                pass
-
-        # Adicionar nova linha de conclusão
-        self.completion_line = self.ax.axvline(x=end_time, color='#ff6b6b', linestyle='--',
-                                              alpha=0.7, linewidth=1.5, label='Conclusão')
-
-        # Atualizar legenda
-        self.ax.legend(loc='upper right', fontsize=8, framealpha=0.8)
-
-        self.canvas.draw_idle()
+        self.completion_time = self.time_data[-1] if self.time_data else None
+        self.update()
 
     def get_peak_speed(self):
-        """Retorna a velocidade de pico registrada no gráfico"""
         return self.chart_peak_speed
 
-
-
     def reset_chart(self):
-        """Reinicia o gráfico para novo download"""
-        self.time_data.clear()
-        self.speed_data.clear()
-        self.chart_peak_speed = 0
-        if hasattr(self, 'start_time'):
-            delattr(self, 'start_time')
-        
-        self.last_chart_update = time.time()
-        
-        self.line.set_data([], [])
-        self.fill.remove()
-        self.fill = self.ax.fill_between([], [], [], color='#4a9eff', alpha=0.1)
+        self.time_data = []
+        self.speed_data = []
+        self.chart_peak_speed = 0.0
+        self.chart_avg_speed = 0.0
+        self.completion_time = None
+        self.update()
 
-        # Resetar limites
-        self.ax.set_xlim(0, 60)
-        self.ax.set_ylim(0, 10)
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        self.canvas.draw()
+        outer_rect = self.rect().adjusted(0, 0, -1, -1)
+        painter.fillRect(outer_rect, QColor("#181818"))
+
+        chart_rect = QRectF(56, 14, max(10, outer_rect.width() - 72), max(10, outer_rect.height() - 40))
+        painter.fillRect(chart_rect, QColor("#1d1f23"))
+        painter.setPen(QPen(QColor("#2f3238"), 1))
+        painter.drawRoundedRect(chart_rect, 6, 6)
+
+        if not self.time_data:
+            painter.setPen(QColor("#7f858f"))
+            painter.drawText(chart_rect, Qt.AlignmentFlag.AlignCenter, "Aguardando dados reais de download")
+            return
+
+        visible_points = self._get_visible_points()
+        if not visible_points:
+            painter.setPen(QColor("#7f858f"))
+            painter.drawText(chart_rect, Qt.AlignmentFlag.AlignCenter, "Sem dados suficientes para exibir")
+            return
+
+        start_time = visible_points[0][0]
+        end_time = visible_points[-1][0]
+        time_span = max(end_time - start_time, 10.0)
+        speed_values_mbps = [speed / (1024 * 1024) for _, speed in visible_points]
+        max_speed_mbps = max(speed_values_mbps) if speed_values_mbps else 0.0
+        y_max = self._nice_axis_limit(max(max_speed_mbps, self.chart_peak_speed / (1024 * 1024), 1.0) * 1.15)
+
+        painter.setPen(QColor("#9ba3b0"))
+        painter.drawText(QRectF(chart_rect.left() + 10, chart_rect.top() + 6, 80, 16),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         "MB/s")
+        painter.drawText(QRectF(chart_rect.right() - 120, chart_rect.top() + 6, 110, 16),
+                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                         f"Janela {self.visible_window_seconds}s")
+
+        self._draw_grid(painter, chart_rect, start_time, end_time, y_max)
+        self._draw_average_line(painter, chart_rect, start_time, time_span, y_max)
+        self._draw_series(painter, chart_rect, visible_points, start_time, time_span, y_max)
+        self._draw_completion_line(painter, chart_rect, start_time, time_span)
+
+    def _get_visible_points(self):
+        if not self.time_data:
+            return []
+
+        points = list(zip(self.time_data, self.speed_data))
+        latest_time = points[-1][0]
+        min_time = max(0.0, latest_time - self.visible_window_seconds)
+        visible = [(t, s) for t, s in points if t >= min_time]
+        if len(visible) == 1:
+            visible.append((visible[0][0] + 0.25, visible[0][1]))
+        return visible
+
+    def _draw_grid(self, painter, chart_rect, start_time, end_time, y_max):
+        grid_pen = QPen(QColor("#2c3138"), 1)
+        grid_pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(grid_pen)
+
+        horizontal_steps = 4
+        for step in range(horizontal_steps + 1):
+            ratio = step / horizontal_steps
+            y = chart_rect.bottom() - (ratio * chart_rect.height())
+            painter.drawLine(
+                QPointF(chart_rect.left(), y),
+                QPointF(chart_rect.right(), y)
+            )
+
+            label_value = y_max * ratio
+            label_rect = QRectF(4, y - 10, 46, 20)
+            painter.setPen(QColor("#9097a3"))
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                             self._format_speed_axis(label_value))
+            painter.setPen(grid_pen)
+
+        vertical_steps = 6
+        for step in range(vertical_steps + 1):
+            ratio = step / vertical_steps
+            x = chart_rect.left() + (ratio * chart_rect.width())
+            painter.drawLine(
+                QPointF(x, chart_rect.top()),
+                QPointF(x, chart_rect.bottom())
+            )
+
+            time_value = start_time + ((end_time - start_time) * ratio)
+            label_rect = QRectF(x - 22, chart_rect.bottom() + 4, 44, 18)
+            painter.setPen(QColor("#9097a3"))
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, self._format_time_axis(time_value))
+            painter.setPen(grid_pen)
+
+    def _draw_average_line(self, painter, chart_rect, start_time, time_span, y_max):
+        avg_speed_mbps = self.chart_avg_speed / (1024 * 1024)
+        if avg_speed_mbps <= 0:
+            return
+
+        y = chart_rect.bottom() - ((avg_speed_mbps / y_max) * chart_rect.height())
+        avg_pen = QPen(QColor(255, 196, 87, 90), 1)
+        avg_pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(avg_pen)
+        painter.drawLine(QPointF(chart_rect.left(), y), QPointF(chart_rect.right(), y))
+
+    def _draw_series(self, painter, chart_rect, visible_points, start_time, time_span, y_max):
+        line_path = QPainterPath()
+        fill_path = QPainterPath()
+
+        first_x = None
+        last_x = None
+        last_y = None
+
+        for index, (point_time, speed_bytes) in enumerate(visible_points):
+            speed_mbps = speed_bytes / (1024 * 1024)
+            x = chart_rect.left() + (((point_time - start_time) / time_span) * chart_rect.width())
+            y = chart_rect.bottom() - ((speed_mbps / y_max) * chart_rect.height())
+
+            if index == 0:
+                line_path.moveTo(x, y)
+                fill_path.moveTo(x, chart_rect.bottom())
+                fill_path.lineTo(x, y)
+                first_x = x
+            else:
+                line_path.lineTo(x, y)
+                fill_path.lineTo(x, y)
+
+            last_x = x
+            last_y = y
+
+        if last_x is None or first_x is None:
+            return
+
+        fill_path.lineTo(last_x, chart_rect.bottom())
+        fill_path.closeSubpath()
+
+        gradient = QLinearGradient(chart_rect.topLeft(), chart_rect.bottomLeft())
+        gradient.setColorAt(0.0, QColor(74, 158, 255, 120))
+        gradient.setColorAt(1.0, QColor(74, 158, 255, 12))
+        painter.fillPath(fill_path, gradient)
+
+        painter.setPen(QPen(QColor("#59a7ff"), 2.4))
+        painter.drawPath(line_path)
+
+        if last_y is not None:
+            painter.setPen(QPen(QColor("#cde3ff"), 1.4))
+            painter.setBrush(QColor("#59a7ff"))
+            painter.drawEllipse(QPointF(last_x, last_y), 4.2, 4.2)
+
+    def _draw_completion_line(self, painter, chart_rect, start_time, time_span):
+        if self.completion_time is None:
+            return
+
+        if self.completion_time < start_time:
+            return
+
+        x = chart_rect.left() + (((self.completion_time - start_time) / time_span) * chart_rect.width())
+        completion_pen = QPen(QColor(255, 107, 107, 180), 1.4)
+        completion_pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(completion_pen)
+        painter.drawLine(QPointF(x, chart_rect.top()), QPointF(x, chart_rect.bottom()))
+
+    def _nice_axis_limit(self, value):
+        if value <= 10:
+            return 10.0
+
+        magnitude = 10 ** math.floor(math.log10(value))
+        normalized = value / magnitude
+
+        if normalized <= 1:
+            nice = 1
+        elif normalized <= 2:
+            nice = 2
+        elif normalized <= 5:
+            nice = 5
+        else:
+            nice = 10
+
+        return nice * magnitude
+
+    def _format_time_axis(self, seconds):
+        total_seconds = max(int(seconds), 0)
+        minutes, sec = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+
+        if hours > 0:
+            return f"{hours:d}:{minutes:02d}:{sec:02d}"
+        if minutes > 0:
+            return f"{minutes:d}:{sec:02d}"
+        return f"{sec:d}s"
+
+    def _format_speed_axis(self, speed_mbps):
+        if speed_mbps >= 100:
+            return f"{speed_mbps:.0f}"
+        if speed_mbps >= 10:
+            return f"{speed_mbps:.1f}"
+        return f"{speed_mbps:.2f}"
 
 
 
@@ -2537,6 +2848,9 @@ class DownloaderGUI(QMainWindow):
         super().__init__()
         self.download_worker = None
         self.total_bytes = 0
+        self.total_segments = 0
+        self.completed_segments = 0
+        self.progress_mode = "bytes"
         self.downloaded_bytes = 0
         self.speed_calc = SpeedCalculator()
         self.history = DownloadHistory()
@@ -2553,7 +2867,7 @@ class DownloaderGUI(QMainWindow):
         }
 
         # Inicializar updater
-        self.current_version = "1.6"  # Versão atual do programa
+        self.current_version = "1.7"  # Versão atual do programa
         self.updater = Updater(self.current_version)
 
         self.init_ui()
@@ -2563,7 +2877,7 @@ class DownloaderGUI(QMainWindow):
         self.check_updates()
         
     def init_ui(self):
-        self.setWindowTitle("Acelerador de Downloads")
+        self.setWindowTitle("Downloader")
 
         # Definir ícone da janela
         self.setWindowIcon(self._get_icon())
@@ -2579,8 +2893,8 @@ class DownloaderGUI(QMainWindow):
         config_menu = menubar.addMenu("Configurações")
         
         # Configurações Avançadas
-        advanced_action = config_menu.addAction("Avançadas...")
-        advanced_action.triggered.connect(self.show_advanced_settings)
+        advanced_action = config_menu.addAction("Configurações...")
+        advanced_action.triggered.connect(self.show_settings)
         
         config_menu.addSeparator()
         
@@ -2598,7 +2912,7 @@ class DownloaderGUI(QMainWindow):
         
         # Performance
         perf_menu = config_menu.addMenu("Performance")
-        self.turbo_merge_action = perf_menu.addAction("Merge Turbo")
+        self.turbo_merge_action = perf_menu.addAction("União Rápida (RAM)")
         self.turbo_merge_action.setCheckable(True)
         self.turbo_merge_action.setChecked(True)
         buffer_menu = perf_menu.addMenu("Buffer")
@@ -2828,7 +3142,7 @@ class DownloaderGUI(QMainWindow):
         outer.setSpacing(20)
 
         # --- Cabeçalho ---
-        header_lbl = QLabel("🧩 Extensão do Chrome — DreamerJP Advanced Interceptor")
+        header_lbl = QLabel("🧩 Extensão para Navegador")
         header_lbl.setStyleSheet(
             "font-size: 15px; font-weight: bold; color: #c8d8e8; padding-bottom: 4px;"
         )
@@ -3404,14 +3718,14 @@ class DownloaderGUI(QMainWindow):
         dialog = AboutDialog(self)
         dialog.exec()
     
-    def show_advanced_settings(self):
-        """Mostra diálogo de configurações avançadas"""
-        dialog = AdvancedSettingsDialog(self)
+    def show_settings(self):
+        """Mostra diálogo de configurações"""
+        dialog = SettingsDialog(self)
         dialog.set_settings(self.advanced_settings)
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.advanced_settings = dialog.get_settings()
-            self.add_log("Configurações avançadas salvas", "success")
+            self.add_log("Configurações salvas", "success")
     
     def browse_file(self):
         file_path, _ = QFileDialog.getSaveFileName(
@@ -3512,15 +3826,15 @@ class DownloaderGUI(QMainWindow):
 
         # Resetar gráfico
         self.speed_chart.reset_chart()
-
-        # Resetar calculador de velocidade
-        self.speed_calc.reset()
         
         self.download_btn.setEnabled(False)
         self.pause_btn.setEnabled(True)
         self.stop_btn.setEnabled(True)
         
         self.total_bytes = 0
+        self.total_segments = 0
+        self.completed_segments = 0
+        self.progress_mode = "bytes"
         self.downloaded_bytes = 0
         self.speed_calc = SpeedCalculator()
         self.start_time = time.time()
@@ -3572,45 +3886,59 @@ class DownloaderGUI(QMainWindow):
             self.download_worker.stop()
             self.add_log("Parando download...", "warning")
             
-    def update_progress(self, bytes_downloaded):
-        self.downloaded_bytes += bytes_downloaded
+    def update_progress(self, progress_update):
+        bytes_delta = 0
+        segments_delta = 0
+        count_speed = True
+
+        if isinstance(progress_update, dict):
+            bytes_delta = int(progress_update.get("bytes", 0) or 0)
+            segments_delta = int(progress_update.get("segments", 0) or 0)
+            count_speed = bool(progress_update.get("count_speed", True))
+        else:
+            bytes_delta = int(progress_update or 0)
+
+        self.downloaded_bytes = max(0, self.downloaded_bytes + bytes_delta)
+        if segments_delta:
+            self.completed_segments = max(0, self.completed_segments + segments_delta)
+
+        self.speed_calc.record_progress(bytes_delta, segments_delta, count_speed=count_speed)
         
     def update_speed_display(self):
         if self.download_worker and self.download_worker.isRunning():
-            self.speed_calc.add_sample(self.downloaded_bytes)
-            
-            current_speed = self.speed_calc.get_speed()
-            avg_speed = self.speed_calc.get_average_speed()
-            peak_speed = self.speed_calc.get_peak_speed()
+            snapshot = self.speed_calc.get_snapshot()
+            current_speed = snapshot["current_speed"]
+            avg_speed = snapshot["average_speed"]
+            peak_speed = snapshot["peak_speed"]
 
             self.speed_label.setText(f"Atual: {self.format_speed(current_speed)}")
             self.avg_speed_label.setText(f"Média: {self.format_speed(avg_speed)}")
             self.peak_speed_label.setText(f"Pico: {self.format_speed(peak_speed)}")
+            self.eta_label.setText(f"ETA: {snapshot['eta']}")
+            self.speed_chart.set_history(snapshot["chart_points"], avg_speed, peak_speed)
 
-            # Para o gráfico, usar a velocidade atual em MB/s
-            current_speed_mbps = current_speed / (1024 * 1024)
-
-            # Adicionar ponto ao gráfico se velocidade > 0
-            if current_speed_mbps > 0:
-                self.speed_chart.add_speed_point(current_speed_mbps)
-
-            # Atualizar visualização do gráfico
-            self.speed_chart.update_chart()
-
-            if self.total_bytes > 0:
-                eta = self.speed_calc.get_eta(self.downloaded_bytes, self.total_bytes)
-                self.eta_label.setText(f"ETA: {eta}")
-
-                percentage = int((self.downloaded_bytes / self.total_bytes) * 100)
+            progress_ratio = snapshot["progress_ratio"]
+            if progress_ratio is not None:
+                percentage = min(max(int(progress_ratio * 100), 0), 100)
                 self.progress_bar.setValue(percentage)
+            else:
+                percentage = None
 
-                downloaded_mb = self.downloaded_bytes / (1024 * 1024)
+            downloaded_mb = snapshot["downloaded_bytes"] / (1024 * 1024)
+            if self.progress_mode == "segments" and self.total_segments > 0:
+                progress_text = f"Baixados: {downloaded_mb:.1f} MB | Peças: {self.completed_segments}/{self.total_segments}"
+                if percentage is not None:
+                    progress_text += f" ({percentage}%)"
+                self.progress_label.setText(progress_text)
+            elif self.total_bytes > 0:
                 total_mb = self.total_bytes / (1024 * 1024)
+                if percentage is None:
+                    percentage = min(max(int((self.downloaded_bytes / self.total_bytes) * 100), 0), 100)
+                    self.progress_bar.setValue(percentage)
                 self.progress_label.setText(
                     f"{downloaded_mb:.1f} MB / {total_mb:.1f} MB ({percentage}%)"
                 )
             else:
-                downloaded_mb = self.downloaded_bytes / (1024 * 1024)
                 self.progress_label.setText(f"Baixados: {downloaded_mb:.1f} MB")
     
     def format_speed(self, speed_bytes_per_sec):
@@ -3623,9 +3951,96 @@ class DownloaderGUI(QMainWindow):
         else:
             return f"{speed_bytes_per_sec/(1024**3):.1f} GB/s"
             
+    def download_finished(self, success, message):
+        try:
+            self.speed_calc.stop_tracking()
+            self.timer.stop()
+
+            final_snapshot = self.speed_calc.get_snapshot()
+            self.speed_label.setText(f"Atual: {self.format_speed(final_snapshot['current_speed'])}")
+            self.avg_speed_label.setText(f"Média: {self.format_speed(final_snapshot['average_speed'])}")
+            self.peak_speed_label.setText(f"Pico: {self.format_speed(final_snapshot['peak_speed'])}")
+            self.eta_label.setText(f"ETA: {final_snapshot['eta']}")
+            self.speed_chart.set_history(
+                final_snapshot["chart_points"],
+                final_snapshot["average_speed"],
+                final_snapshot["peak_speed"]
+            )
+
+            if hasattr(self, 'speed_chart') and self.speed_chart.time_data:
+                self.speed_chart.mark_download_complete()
+    
+            self.download_btn.setEnabled(True)
+            self.pause_btn.setEnabled(False)
+            self.pause_btn.setText("Pausar")
+            self.stop_btn.setEnabled(False)
+            self.checksum_input.clear()
+            
+            if success:
+                self.progress_bar.setValue(100)
+                self.progress_label.setText("Download completo!")
+                
+                # Adicionar ao histórico
+                duration = time.time() - self.start_time if self.start_time else 0
+                self.history.add(
+                    self.url_input.text().strip(),
+                    self.download_worker.output_path if self.download_worker else "",
+                    self.downloaded_bytes,
+                    duration,
+                    True
+                )
+                self.load_history()
+                self.add_log(message, "success")
+            else:
+                if self.progress_mode == "segments" and self.total_segments > 0:
+                    self.progress_label.setText(
+                        f"Download falhou | Baixados: {self.downloaded_bytes / (1024 * 1024):.1f} MB | "
+                        f"Peças: {self.completed_segments}/{self.total_segments}"
+                    )
+                else:
+                    self.progress_label.setText("Download falhou")
+                
+                # Adicionar falha ao histórico
+                if self.download_worker:
+                    duration = time.time() - self.start_time if self.start_time else 0
+                    self.history.add(
+                        self.url_input.text().strip(),
+                        self.download_worker.output_path or "falha_download",
+                        self.downloaded_bytes,
+                        duration,
+                        False
+                    )
+                    self.load_history()
+                
+                QMessageBox.critical(self, "Erro", message)
+                
+            self.download_worker = None
+        except Exception as e:
+            print(f"Erro ao finalizar UI: {e}")
+            self.add_log(f"Erro crítico na UI: {e}", "error")
+            self.download_btn.setEnabled(True)
+            self.download_worker = None
+
     def set_total_size(self, total_size):
-        self.total_bytes = total_size
         self.progress_bar.setMaximum(100)
+
+        if isinstance(total_size, dict):
+            mode = total_size.get("mode")
+            if mode == "segments":
+                self.progress_mode = "segments"
+                self.total_segments = max(int(total_size.get("total", 0) or 0), 0)
+                self.completed_segments = 0
+                self.total_bytes = 0
+                self.speed_calc.set_total_segments(self.total_segments)
+                return
+
+            total_size = total_size.get("total", 0)
+
+        self.progress_mode = "bytes"
+        self.total_segments = 0
+        self.completed_segments = 0
+        self.total_bytes = max(int(total_size or 0), 0)
+        self.speed_calc.set_total_bytes(self.total_bytes)
         
     def add_log(self, message, level="info"):
         # Emojis apenas para a área de status
@@ -3652,58 +4067,7 @@ class DownloaderGUI(QMainWindow):
         self.log_output.append(formatted)
         scrollbar = self.log_output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
-        
-    def download_finished(self, success, message):
-        self.timer.stop()
 
-        # Ajustar automaticamente os limites do gráfico para mostrar todo o histórico
-        if hasattr(self.speed_chart, 'time_data') and self.speed_chart.time_data:
-            self.speed_chart.update_chart_limits()
-            # Marcar o ponto de conclusão do download
-            self.speed_chart.mark_download_complete()
-
-        self.download_btn.setEnabled(True)
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.setText("Pausar")
-        self.stop_btn.setEnabled(False)
-        self.checksum_input.clear()
-        
-        if success:
-            self.progress_bar.setValue(100)
-            self.progress_label.setText("Download completo!")
-            
-            # Adicionar ao histórico
-            duration = time.time() - self.start_time if self.start_time else 0
-            self.history.add(
-                self.url_input.text().strip(),
-                self.download_worker.output_path if self.download_worker else "",
-                self.total_bytes,
-                duration,
-                True
-            )
-            self.load_history()
-            
-            # Apenas log, sem popup
-            self.add_log(message, "success")
-        else:
-            self.progress_label.setText("Download falhou")
-            
-            # Adicionar falha ao histórico
-            if self.download_worker:
-                duration = time.time() - self.start_time if self.start_time else 0
-                self.history.add(
-                    self.url_input.text().strip(),
-                    self.download_worker.output_path,
-                    self.total_bytes,
-                    duration,
-                    False
-                )
-                self.load_history()
-            
-            QMessageBox.critical(self, "Erro", message)
-            
-        self.download_worker = None
-        
     def load_history(self):
         self.history_table.setRowCount(0)
         
