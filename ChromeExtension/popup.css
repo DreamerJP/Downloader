@@ -1,5 +1,5 @@
 /* ============================================================
-   DreamerJP Advanced Interceptor — popup.css v2.0
+   Downloader — popup.css v3.1
    ============================================================ */
 
 :root {
@@ -46,22 +46,25 @@ header {
   flex-shrink: 0;
 }
 
-.logo { display: flex; flex-direction: column; gap: 2px; }
+.logo-container { display: flex; align-items: center; gap: 10px; }
+.logo-img { width: 32px; height: 32px; -webkit-filter: drop-shadow(0 0 5px var(--accent-glow)); filter: drop-shadow(0 0 5px var(--accent-glow)); }
+.logo-text { display: flex; flex-direction: column; gap: 1px; }
 
-.glitch {
+.brand {
   font-family: 'Fira Code', monospace;
   font-weight: 600;
-  font-size: 1.1rem;
+  font-size: 1.15rem;
   color: var(--accent);
-  letter-spacing: 2px;
-  text-shadow: 0 0 8px var(--accent-glow);
+  letter-spacing: 1px;
+  text-shadow: 0 0 10px var(--accent-glow);
 }
 
 .sub {
   font-family: 'Fira Code', monospace;
   font-size: 0.65rem;
-  color: var(--text-muted);
-  letter-spacing: 1px;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+  opacity: 0.8;
 }
 
 .header-actions {

@@ -1,5 +1,5 @@
 /**
- * injected.js — DreamerJP Stealth Interceptor v3.0
+ * injected.js — Downloader Core v3.1
  *
  * Rodado com world: "MAIN" pelo Chrome — injeta ANTES de qualquer
  * script da página, bypassando CSP, sem precisar de <script src>.

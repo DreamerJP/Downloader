@@ -1,5 +1,5 @@
 // ============================================================
-//  DreamerJP Advanced Interceptor — background.js  v3.0
+//  Downloader — background.js  v3.1
 // ============================================================
 
 const requestHeadersCache = new Map();

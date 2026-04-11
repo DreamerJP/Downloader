@@ -1,5 +1,5 @@
 // ============================================================
-//  popup.js — DreamerJP Advanced Interceptor v2.0
+//  popup.js — Downloader v3.1
 // ============================================================
 
 document.addEventListener('DOMContentLoaded', () => {

@@ -1,5 +1,5 @@
 /**
- * content.js — DreamerJP Bridge v3.0
+ * content.js — Downloader Bridge v3.1
  *
  * Roda no mundo isolado (isolated world).
  * Recebe postMessage do injected.js (world: MAIN) e repassa ao background.js.

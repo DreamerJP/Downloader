@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "Downloader Extension",
-  "version": "3.0",
-  "description": "Captura de links de streams (M3U8, MPD, MP4, TS) para o gerenciador de downloads.",
+  "name": "Downloader",
+  "version": "3.1",
+  "description": "Captura de links de mídia para o gerenciador de downloads.",
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
   "permissions": [
     "webRequest",
     "storage",
@@ -18,7 +24,13 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Downloader Extension"
+    "default_title": "Downloader",
+    "default_icon": {
+      "16": "icon16.png",
+      "32": "icon32.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   },
   "content_scripts": [
     {
