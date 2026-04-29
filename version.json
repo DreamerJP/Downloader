@@ -1,5 +1,5 @@
 {
-    "version": "1.7",
+    "version": "2.1",
     "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v1.7/Downloader.exe",
     "changelog": [
         "Melhoria na integridade de arquivos de vídeo HLS (evita stuttering ao realizar busca/seek)",
