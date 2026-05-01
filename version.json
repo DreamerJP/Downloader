@@ -2,10 +2,10 @@
     "version": "2.0",
     "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v2.0/Downloader.exe",
     "changelog": [
-        "Refatoração completa da arquitetura do projeto: transição de um arquivo monolítico para uma estrutura modular organizada.",
-        "Reformulação completa do funcionamento interno: todos os motores de download e processamento foram reescritos.",
-        "Otimização massiva de desempenho: as funções existentes agora operam de forma significativamente mais rápida, estável e eficiente.",
-        "Separação de responsabilidades em módulos distintos (Interface UI, Core e Workers), garantindo estabilidade durante downloads pesados.",
-        "Código base modernizado e preparado para receber novas funções com muito mais facilidade."
+        "Nova arquitetura modular: sistema reescrito do zero para garantir 100% de estabilidade e velocidade.",
+        "Interface Renovada: Redesign visual da extensão para Chrome, tornando a navegação mais fluida e moderna.",
+        "Otimização de Performance: Motores de download agora operam de forma significativamente mais eficiente.",
+        "Segurança Reforçada: Implementação de novas camadas de proteção no processamento de dados.",
+        "Preparado para o Futuro: Código base modernizado, facilitando a chegada de novas funções em breve."
     ]
 }
