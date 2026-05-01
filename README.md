@@ -1,162 +1,89 @@
-# Downloader
+# Downloader v2.0
 
-Gerenciador de downloads multithread com suporte a HLS/M3U8 e extensão integrada para o Chrome.
+Gerenciador de downloads multithread de alta performance com arquitetura modular, suporte nativo a HLS/M3U8 e integração profunda com o ecossistema Chrome.
 
-[![Python](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
-[![PyQt6](https://img.shields.io/badge/PyQt6-6.5+-41CD52.svg?style=flat&logo=qt&logoColor=white)](https://www.qt.io)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
+[![PyQt6](https://img.shields.io/badge/PyQt6-6.4+-41CD52.svg?style=flat&logo=qt&logoColor=white)](https://www.qt.io)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.7-red.svg?style=flat)](https://github.com/DreamerJP/Downloader/releases)
+[![Version](https://img.shields.io/badge/version-2.0-green.svg?style=flat)](https://github.com/DreamerJP/Downloader/releases)
 
 ---
 
 ## Visão Geral
 
-Ferramenta de download desenvolvida em Python com interface PyQt6, capaz de baixar arquivos comuns e streams de vídeo HLS/M3U8 com alta performance usando centenas de conexões paralelas. Inclui uma extensão para o Chrome que captura links de vídeo automaticamente enquanto você navega.
+O **Downloader v2.0** é uma reengenharia completa focada em performance bruta e estabilidade. Utiliza uma arquitetura multithread massiva com balanceamento dinâmico de carga, permitindo saturar conexões de alta velocidade enquanto mantém uma interface fluida e responsiva baseada no design system "Midnight Pro".
 
 ---
 
-## Funcionalidades
+## Principais Diferenciais Técnicos
 
-### ⚡ Performance
-- Download paralelo com até **512 conexões simultâneas** por arquivo
-- Chunk size adaptativo: **256 KB a 32 MB** dependendo do tamanho do arquivo
-- Merge em RAM para arquivos até ~300 MB (zero operações de disco extras)
-- Otimização **X3D**: chunks de 32 MB para CPUs com cache L3 3D (AMD X3D e similares)
-- Monitoramento em tempo real: velocidade atual, média, pico e ETA
+### Performance de Próxima Geração
+- **Paralelismo Massivo**: Suporte a até 512 conexões simultâneas por download.
+- **Otimização L3 Cache (X3D)**: Algoritmo de segmentação adaptativa (256KB a 32MB) projetado para minimizar cache misses em CPUs modernas.
+- **Zero-Disk Overhead**: Sistema de RAM Merging para arquivos até 300MB, processando a união de segmentos inteiramente em memória para máxima velocidade e preservação do SSD.
+- **Telemetria via NIC**: Monitoramento de velocidade em tempo real via contadores de hardware (PSUtil), garantindo precisão absoluta sem sobrecarregar as threads de processamento.
 
-### 🎬 Suporte a Streams HLS/M3U8
-- Parser completo de **Master Playlist** com seleção automática da resolução máxima
-- Download paralelo de segmentos `.ts` com montagem sequencial automática
-- Empacotamento otimizado para compatibilidade total de busca (Seek/Rewind)
-- Suporte a **criptografia AES-128** — descriptografia automática por segmento
-- Fallback inteligente em caso de segmentos com falha
+### Engine de Mídia Avançada
+- **HLS/M3U8 Pro**: Parser inteligente de Master Playlists com seleção automática de resolução (360p até 4K).
+- **Descriptografia On-the-fly**: Suporte nativo a streams criptografados com AES-128, realizando a descriptografia de cada segmento em tempo real.
+- **Recuperação de Falhas**: Sistema de re-tentativa automática para segmentos corrompidos ou links expirados.
 
-### 🧩 Extensão do Chrome
-- Captura links de vídeo (M3U8, MP4, TS, MPD) enquanto você assiste no browser
-- Limpeza automática de links capturados ao trocar de aba no navegador
-- Instalação com **um clique** diretamente pelo app (via registro do Windows)
-- Desinstalação limpa também pela interface
-- Sem necessidade de publicar na Chrome Web Store
-
-### 🛠️ Recursos Técnicos
-- Headers HTTP customizados por download (`User-Agent`, `Referer`, `Cookie` etc.)
-- Verificação de integridade via **checksum SHA-256** pós-download
-- Suporte a proxy HTTP/HTTPS com autenticação
-- Detecção automática de qualidade para URLs de vídeo (360p → 4K)
-- Sistema de **atualização automática** integrado
-- Histórico completo de downloads com exportação JSON
+### Integração com Navegador
+- **Chrome Extension Monitor**: Captura links de vídeo (M3U8, MP4, TS, MPD) automaticamente durante a navegação.
+- **Gerenciamento Nativo**: Instalação e atualização da extensão diretamente pela interface do app, com limpeza automática de metadados ao alternar abas.
 
 ---
 
-## Requisitos
+## Arquitetura Modular (v2.0)
 
-| Item | Versão mínima |
-|------|--------------|
-| Python | 3.10+ |
-| SO | Windows 10/11 |
-| Chrome (opcional) | Qualquer versão recente |
+O projeto segue um padrão de separação de responsabilidades rigoroso:
+
+- **core/**: O motor da aplicação. Contém a lógica de segmentação, cálculos de telemetria, detecção de qualidade e persistência de histórico.
+- **ui/**: Camada de interface. Componentes desacoplados, diálogos modernos e o design system centralizado em theme.py.
+- **workers/**: Orquestração de threads. Gerencia o ciclo de vida dos downloads, atualizações de sistema e tarefas de background.
+- **chrome_ext/**: Código fonte da extensão que alimenta o sistema de captura.
 
 ---
 
-## Instalação
+## Requisitos e Dependências
 
-### Executável (recomendado para usuários finais)
+| Requisito | Versão Mínima |
+|-----------|---------------|
+| **Sistema Operacional** | Windows 10 ou 11 |
+| **Python** | 3.10+ |
+| **PyQt6** | 6.4.0+ |
+| **Bibliotecas Chave** | requests, m3u8, pycryptodome, psutil |
 
-Baixe `Downloader.exe` na seção [Releases](https://github.com/DreamerJP/Downloader/releases) e execute diretamente — sem instalar nada.
+---
 
-### Modo desenvolvimento (a partir do código-fonte)
+## Desenvolvimento e Build
+
+### Executando via Código Fonte
+
+1. Instale as dependências:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Inicie a aplicação:
+   ```bash
+   python main.py
+   ```
+
+### Geração de Binário (.exe)
+
+O projeto utiliza o PyInstaller com suporte a bundling de assets e metadados de sistema (AppUserModelID):
 
 ```bash
-# 1. Clonar o repositório
-git clone https://github.com/DreamerJP/Downloader.git
-cd Downloader
-
-# 2. Instalar dependências
-pip install -r requirements.txt
-
-# 3. Executar
-python Downloader.py
+# Para gerar o executável usando o spec oficial:
+pyinstaller main.spec
 ```
-
-### Dependências principais
-```
-PyQt6>=6.5.0
-matplotlib>=3.7.0
-numpy>=1.24.0
-requests>=2.31.0
-urllib3>=2.0.0
-m3u8>=6.0.0
-pycryptodome>=3.20.0
-```
-
----
-
-## Uso
-
-### Download básico
-1. Cole a URL do arquivo no campo **URL**
-2. Ajuste o número de **Conexões** (padrão: 512)
-3. Clique em **Iniciar**
-
-### Download de vídeo HLS/M3U8
-1. Cole a URL da playlist `.m3u8` no campo **URL**
-2. O app detecta automaticamente o tipo de stream e seleciona a melhor resolução
-3. Clique em **Iniciar** — os segmentos são baixados em paralelo e montados automaticamente
-
-### Extensão do Chrome
-1. Abra a aba **🧩 Extensão Chrome** no app
-2. Clique em **Instalar Extensão**
-3. Reinicie o Chrome
-4. Navegue normalmente — a extensão captura vídeos automaticamente
-
----
-
-## Estrutura do Projeto
-
-```
-Downloader/
-├── Downloader.py          # Aplicação principal (core + interface)
-├── Downloader.spec        # Configuração do PyInstaller
-├── ChromeExtension/       # Extensão do Chrome (empacotada no .exe)
-│   ├── manifest.json
-│   ├── background.js
-│   ├── content.js
-│   ├── injected.js
-│   ├── popup.html
-│   ├── popup.css
-│   └── popup.js
-├── requirements.txt       # Dependências Python
-├── version.json           # Controle de versão e changelog
-├── ico.ico                # Ícone da aplicação
-└── README.md              # Documentação
-```
-
----
-
-## Build do Executável
-
-```bash
-pip install pyinstaller
-pyinstaller Downloader.spec
-```
-
-> O `Downloader.spec` está configurado com as dependências necessárias e inclui a pasta `ChromeExtension` automaticamente no pacote.
-
----
-
-## Principais Classes
-
-| Classe | Responsabilidade |
-|--------|-----------------|
-| `DownloadWorker` | Motor de download: multithread, HLS, AES, união |
-| `ChromeExtensionInstaller` | Instalação/remoção da extensão para navegador |
-| `Updater` | Verificação e instalação de novas versões |
-| `SpeedCalculator` | Métricas de velocidade com média móvel |
-| `DownloadHistory` | Histórico persistente em JSON |
-| `DownloaderGUI` | Interface principal (PyQt6 + matplotlib) |
 
 ---
 
 ## Licença
 
-Apache License 2.0 — consulte o arquivo [LICENSE](LICENSE) para detalhes.
+Distribuído sob a licença Apache License 2.0. Veja o arquivo LICENSE para detalhes.
+
+---
+Desenvolvido por **DreamerJP**

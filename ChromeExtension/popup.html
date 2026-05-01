@@ -2,52 +2,46 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Downloader</title>
   <link rel="stylesheet" href="popup.css">
-  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 </head>
 <body>
-  <div class="container">
-    <header>
-      <div class="logo-container">
-        <img src="icon32.png" alt="Logo" class="logo-img">
-        <div class="logo-text">
-          <span class="brand">DOWNLOADER</span>
-          <span class="sub">Captura de Mídia</span>
-        </div>
-      </div>
-      <div class="header-actions">
-        <label class="toggle-label" title="Mostrar apenas vídeos da aba atual">
-          <input type="checkbox" id="currentTabOnly" checked>
-          <span>Aba atual</span>
-        </label>
-        <button id="clearBtn" class="btn-icon" title="Limpar lista da aba">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="3 6 5 6 21 6"></polyline>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-          </svg>
-        </button>
-      </div>
-    </header>
+  <header>
+    <div class="logo-container">
+      <img src="icon32.png" alt="Logo" class="logo-img">
+      <span class="brand">Downloader</span>
+    </div>
+    <div class="header-actions">
+      <label class="toggle-label">
+        <input type="checkbox" id="currentTabOnly" checked>
+        <span>Aba atual</span>
+      </label>
+      <button id="clearBtn" class="btn-icon" title="Limpar lista">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+        </svg>
+      </button>
+    </div>
+  </header>
 
-    <div class="status-bar">
+  <div class="toolbar">
+    <div class="status-indicator">
       <span class="status-dot" id="statusDot"></span>
-      <span id="statusText">Aguardando tráfego de mídia...</span>
-      <div class="filter-pills" id="filterPills">
-        <button class="pill active" data-filter="all">Todos</button>
-        <button class="pill" data-filter="M3U8">M3U8</button>
-        <button class="pill" data-filter="MPD">MPD</button>
-        <button class="pill" data-filter="MP4">MP4</button>
-        <button class="pill" data-filter="Áudio">Áudio</button>
-      </div>
-      <span class="count-badge" id="mediaCount">0</span>
+      <span id="statusText">Aguardando...</span>
     </div>
-
-    <div id="mediaList" class="media-list">
-      <!-- Cards de mídia injetados via JS -->
+    <div class="filter-pills" id="filterPills">
+      <button class="pill active" data-filter="all">Todos</button>
+      <button class="pill" data-filter="M3U8">M3U8</button>
+      <button class="pill" data-filter="MPD">MPD</button>
+      <button class="pill" data-filter="MP4">MP4</button>
+      <button class="pill" data-filter="Áudio">Áudio</button>
     </div>
+    <span class="count-badge" id="mediaCount">0</span>
   </div>
+
+  <div id="mediaList" class="media-list"></div>
 
   <script src="popup.js"></script>
 </body>

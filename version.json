@@ -1,13 +1,11 @@
 {
-    "version": "2.1",
-    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v1.5/Downloader.exe",
+    "version": "2.0",
+    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v2.0/Downloader.exe",
     "changelog": [
-        "Melhoria na integridade de arquivos de vídeo HLS (evita stuttering ao realizar busca/seek)",
-        "Otimização no empacotamento de segmentos TS para garantir compatibilidade com players de vídeo",
-        "Ajuste automático de extensão do arquivo para fluxos M3U8 (força .ts para evitar erros)",
-        "Melhoria na captura de links: limpeza automática ao trocar de aba",
-        "Interface: Ajustes no dimensionamento do gráfico de velocidade e janelas de configurações",
-        "Sistema de Atualização: Maior robustez na finalização de processos antigos durante o update",
-        "Correções gerais em diálogos de erro e validações de nomes de arquivos"
+        "Refatoração completa da arquitetura do projeto: transição de um arquivo monolítico para uma estrutura modular organizada.",
+        "Reformulação completa do funcionamento interno: todos os motores de download e processamento foram reescritos.",
+        "Otimização massiva de desempenho: as funções existentes agora operam de forma significativamente mais rápida, estável e eficiente.",
+        "Separação de responsabilidades em módulos distintos (Interface UI, Core e Workers), garantindo estabilidade durante downloads pesados.",
+        "Código base modernizado e preparado para receber novas funções com muito mais facilidade."
     ]
 }

@@ -70,11 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <div class="no-media">
           <div class="no-media-icon">📡</div>
           <p class="no-media-title">Nenhuma mídia capturada</p>
-          <p class="no-media-hint">
-            <strong style="color:#f97316">① Recarregue a página (F5)</strong><br>
-            ② Dê Play no vídeo novamente.<br>
-            <span style="color:#6b7280; font-size:0.8em">A interceptação só registra tráfego após a extensão estar ativa.</span>
-          </p>
+          <p class="no-media-hint">Recarregue a página e dê play no vídeo.<br>A extensão só captura tráfego após estar ativa.</p>
         </div>`;
       return;
     }
@@ -121,30 +117,42 @@ document.addEventListener('DOMContentLoaded', () => {
     const hasUserAgent = !!(item.headers && item.headers['user-agent']);
     const hasCookies  = !!(item.headers && item.headers['cookie']);
 
+    const safeType = escHtml(item.type || 'Mídia');
+    const safeResLabel = resLabel ? escHtml(resLabel) : null;
+    const safeQualLabel = qualLabel ? escHtml(qualLabel) : null;
+    const safeSizeLabel = sizeLabel ? escHtml(sizeLabel) : null;
+    const safeTimeLabel = escHtml(timeLabel);
+    const safePageUrl = escHtml(item.pageUrl || '');
+    const safeUrl = escHtml(item.url || '');
+    const safeHostname = escHtml(hostname || '—');
+    const safeFilename = escHtml(filename || '');
+    const safeTabTitle = escHtml(item.tabTitle || 'Aba Desconhecida');
+
     card.innerHTML = `
       <div class="card-top">
-        <span class="fmt-badge ${formatClass}">${item.type}${item.isMaster ? ' ★' : ''}</span>
+        <span class="fmt-badge ${formatClass}">${safeType}${item.isMaster ? ' ★' : ''}</span>
         <div class="card-meta-right">
-          ${resLabel   ? `<span class="meta-pill res">${resLabel}</span>` : ''}
-          ${qualLabel  ? `<span class="meta-pill qual">${qualLabel}</span>` : ''}
-          ${sizeLabel  ? `<span class="meta-pill size">${sizeLabel}</span>` : ''}
-          <span class="meta-time">${timeLabel}</span>
+          ${safeResLabel   ? `<span class="meta-pill res">${safeResLabel}</span>` : ''}
+          ${safeQualLabel  ? `<span class="meta-pill qual">${safeQualLabel}</span>` : ''}
+          ${safeSizeLabel  ? `<span class="meta-pill size">${safeSizeLabel}</span>` : ''}
+          <span class="meta-time">${safeTimeLabel}</span>
         </div>
       </div>
 
-      <div class="card-host" title="${item.pageUrl || ''}">${hostname || '—'}</div>
-
-      <div class="card-filename" title="${item.url}">${filename}</div>
-
-      <div class="card-url-row">
-        <span class="card-url" title="${item.url}">${item.url}</span>
+      <div class="card-body">
+        <div class="card-filename" title="${safeUrl}">${safeFilename}</div>
+        <div class="card-host" title="${safePageUrl}">${safeHostname}</div>
       </div>
 
-      <div class="card-tab-row" title="${item.pageUrl || ''}">
+      <div class="card-url-row">
+        <span class="card-url" title="${safeUrl}">${safeUrl}</span>
+      </div>
+
+      <div class="card-tab-row" title="${safePageUrl}">
         <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="2" y="3" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>
         </svg>
-        <span>${escHtml(item.tabTitle || 'Aba Desconhecida')}</span>
+        <span>${safeTabTitle}</span>
       </div>
 
       ${(hasReferer || hasUserAgent || hasCookies) ? `
@@ -199,7 +207,12 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function escHtml(str) {
-    return (str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(str || '')
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
   }
 
   function formatBytes(bytes) {
