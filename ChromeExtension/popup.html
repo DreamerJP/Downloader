@@ -3,45 +3,46 @@
 <head>
   <meta charset="UTF-8">
   <title>Downloader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Geist:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="popup.css">
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 </head>
 <body>
   <header>
-    <div class="logo-container">
-      <img src="icon32.png" alt="Logo" class="logo-img">
+    <div class="header-left">
+      <img src="icon32.png" alt="" class="logo">
       <span class="brand">Downloader</span>
     </div>
-    <div class="header-actions">
-      <label class="toggle-label">
+    <div class="header-right">
+      <label class="tab-toggle" title="Filtrar pela aba atual">
         <input type="checkbox" id="currentTabOnly" checked>
-        <span>Aba atual</span>
+        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        <span class="toggle-label">Aba atual</span>
       </label>
-      <button id="clearBtn" class="btn-icon" title="Limpar lista">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="3 6 5 6 21 6"/>
-          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+      <button id="clearBtn" class="icon-btn danger" title="Limpar lista">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M2 4h12M6 4V2.5a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5V4M5 4l.5 9.5h5L11 4"/>
         </svg>
       </button>
     </div>
   </header>
 
   <div class="toolbar">
-    <div class="status-indicator">
-      <span class="status-dot" id="statusDot"></span>
+    <div class="status">
+      <span class="dot" id="statusDot"></span>
       <span id="statusText">Aguardando...</span>
     </div>
-    <div class="filter-pills" id="filterPills">
-      <button class="pill active" data-filter="all">Todos</button>
-      <button class="pill" data-filter="M3U8">M3U8</button>
-      <button class="pill" data-filter="MPD">MPD</button>
-      <button class="pill" data-filter="MP4">MP4</button>
-      <button class="pill" data-filter="Áudio">Áudio</button>
+    <div class="filters" id="filterPills">
+      <button class="chip active" data-filter="all">Todos</button>
+      <button class="chip" data-filter="HLS">HLS</button>
+      <button class="chip" data-filter="DASH">DASH</button>
+      <button class="chip" data-filter="MP4">MP4</button>
+      <button class="chip" data-filter="Áudio">Áudio</button>
     </div>
-    <span class="count-badge" id="mediaCount">0</span>
+    <span class="counter" id="mediaCount">0</span>
   </div>
 
-  <div id="mediaList" class="media-list"></div>
+  <main id="mediaList"></main>
 
   <script src="popup.js"></script>
 </body>
