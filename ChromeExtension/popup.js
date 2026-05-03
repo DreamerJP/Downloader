@@ -191,12 +191,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const actions = document.createElement('div');
     actions.className = 'card-actions';
     actions.innerHTML = `
-      <button class="btn-act btn-copy" type="button">
+      <button class="btn-act btn-copy" type="button" title="Copia JSON com URL + headers (Cookie/Referer) para colar no app">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="9" y="9" width="13" height="13" rx="2"/>
           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
         </svg>
-        <span>Copiar URL</span>
+        <span>Copiar p/ app</span>
       </button>
       <button class="btn-act btn-open" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -213,16 +213,22 @@ document.addEventListener('DOMContentLoaded', () => {
     const copyLabel = copyBtn.querySelector('span');
     copyBtn.addEventListener('click', () => {
       const url = getCurrentUrl(card, group);
-      navigator.clipboard.writeText(url).then(() => {
+      const sel = card.querySelector('.variant-select');
+      const variant = sel
+        ? group.variants[parseInt(sel.value, 10)]
+        : primary;
+      const payload = buildDownloaderPayload(url, variant);
+
+      navigator.clipboard.writeText(JSON.stringify(payload)).then(() => {
         copyBtn.classList.add('copied');
         copyLabel.textContent = 'Copiado!';
         setTimeout(() => {
           copyBtn.classList.remove('copied');
-          copyLabel.textContent = 'Copiar URL';
+          copyLabel.textContent = 'Copiar p/ app';
         }, 1800);
       }).catch(() => {
         copyLabel.textContent = 'Erro';
-        setTimeout(() => { copyLabel.textContent = 'Copiar URL'; }, 1800);
+        setTimeout(() => { copyLabel.textContent = 'Copiar p/ app'; }, 1800);
       });
     });
 
@@ -234,6 +240,82 @@ document.addEventListener('DOMContentLoaded', () => {
     if (primary.isMaster) card.classList.add('is-master');
 
     return card;
+  }
+
+  // ── Headers para o aplicativo Desktop (cookies/Referer reais da aba) ──
+  const HEADER_BLOCKLIST = new Set([
+    'host',
+    'connection',
+    'content-length',
+    'keep-alive',
+    'transfer-encoding',
+    'upgrade',
+    'te',
+    'trailer',
+    'proxy-connection',
+    'proxy-authorization',
+    'range',
+    ':authority',
+    ':method',
+    ':path',
+    ':scheme',
+    'sec-websocket-extensions',
+    'sec-websocket-key',
+    'sec-websocket-protocol',
+    'sec-websocket-version'
+  ]);
+
+  function normalizeHeaderKeys(headers) {
+    const out = {};
+    if (!headers || typeof headers !== 'object') return out;
+    for (const [name, raw] of Object.entries(headers)) {
+      if (!name || typeof raw !== 'string' || !raw.trim()) continue;
+      const lk = String(name).toLowerCase();
+      if (HEADER_BLOCKLIST.has(lk)) continue;
+
+      let title = lk
+        .split('-')
+        .map(seg => (/^[a-z]+$/.test(seg) ? seg.charAt(0).toUpperCase() + seg.slice(1) : seg))
+        .join('-');
+      title = title
+        .replace(/^Sec-Ch-Ua-Mobile$/i, 'Sec-CH-UA-Mobile')
+        .replace(/^Sec-Ch-Ua-Platform$/i, 'Sec-CH-UA-Platform')
+        .replace(/^Sec-Ch-Ua\b/i, 'Sec-CH-UA');
+
+      out[title] = raw;
+    }
+    return out;
+  }
+
+  function headerKeysCI(h) {
+    const map = {};
+    if (!h) return map;
+    for (const k of Object.keys(h)) map[String(k).toLowerCase()] = true;
+    return map;
+  }
+
+  function buildDownloaderPayload(url, variant) {
+    const headers = normalizeHeaderKeys(variant.headers || {});
+    const hk = headerKeysCI(headers);
+    const refPage = String(variant.pageUrl || '').trim();
+
+    // googlevideo usa assinatura atrelada ao contexto da aba — Referer deve ser o post/Blogger real
+    if (/^https?:\/\//i.test(refPage) && !hk.referer) {
+      headers.Referer = refPage;
+    }
+
+    try {
+      if (/\bgooglevideo\.com\b/i.test(url) && refPage.startsWith('http')) {
+        const uo = new URL(refPage);
+        if (!hk.origin && uo.hostname) {
+          headers.Origin = uo.origin;
+        }
+      }
+    } catch (_) {}
+
+    const payload = { url, headers };
+    if (refPage) payload.page_url = refPage;
+    return payload;
   }
 
   // ── Helpers ────────────────────────────────────────────────

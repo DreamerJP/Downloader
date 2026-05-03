@@ -152,7 +152,11 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
         cmd_recv : Pipe end para receber comandos do parent
     """
     from core.file_utils import make_unique_path, resolve_output_path
-    from core.http_session import create_session, get_server_info
+    from core.http_session import (
+        apply_streaming_compat_headers,
+        create_session,
+        get_server_info,
+    )
     from core.quality_detector import (
         find_best_quality_url,
         get_optimal_chunk_size,
@@ -191,12 +195,14 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
         )
 
         url = config["url"]
+        apply_streaming_compat_headers(session, url)
         if (
             config.get("auto_detect_quality", True)
             and is_video_url(url)
             and not is_hls_url(url)
         ):
             url = find_best_quality_url(session, url, stop_event, emitter.log)
+            apply_streaming_compat_headers(session, url)
 
         emitter.log("Resolvendo caminho de destino...", "info")
         resolved = resolve_output_path(config.get("output_path") or "", url)

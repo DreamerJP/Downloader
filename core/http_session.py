@@ -6,6 +6,7 @@ Sem dependências de PyQt6.
 
 import socket
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 import requests
 import requests.adapters
@@ -17,6 +18,77 @@ from core.constants import (
     RETRY_BACKOFF,
     RETRY_LIMIT,
 )
+
+
+# CDN de streaming costuma barrar UA de bot e responde igual ao navegador com Chrome UA.
+DEFAULT_STREAMING_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36 Downloader/2.0"
+)
+
+
+def _host_avoids_byte_range_probe(hostname: Optional[str]) -> bool:
+    h = (hostname or "").lower()
+    return "googlevideo.com" in h or h.endswith(".googleusercontent.com")
+
+
+def _google_stream_refer_origin(url: str) -> tuple[str, str]:
+    """
+    Fallback quando só temos URL e nenhum Referer nos headers:
+    vídeos source=blogger exigem contexto Blogger; demais urls googlevideo tendem youtube.com.
+    """
+    qp = parse_qs(urlparse(url).query)
+    source = (qp.get("source") or [""])[0].lower()
+    if source == "blogger":
+        referer = "https://www.blogger.com/"
+        origin = "https://www.blogger.com"
+    else:
+        referer = "https://www.youtube.com/"
+        origin = "https://www.youtube.com"
+    return referer, origin
+
+
+def apply_streaming_compat_headers(session: requests.Session, url: str) -> None:
+    """
+    Preenche Referer/Origin típicos de player embutido para CDNs Google quando o cliente
+    não enviou overrides (JSON do interceptor). Para googlevideo Blogger, evita usar só YouTube.
+
+    Preferência máxima: copiar pelo popup da extensão em JSON (cookies + Referer da aba).
+    """
+    hostname = urlparse(url).hostname
+    if not _host_avoids_byte_range_probe(hostname):
+        return
+    h = session.headers
+
+    ua = (h.get("User-Agent") or "").lower()
+
+    chrome_profile = [
+        ("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"),
+        ("Sec-CH-UA", '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"'),
+        ("Sec-CH-UA-Mobile", "?0"),
+        ("Sec-CH-UA-Platform", '"Windows"'),
+        ("Sec-Fetch-Dest", "video"),
+        ("Sec-Fetch-Mode", "no-cors"),
+        ("Sec-Fetch-Site", "cross-site"),
+        ("Priority", "i"),
+    ]
+    for name, value in chrome_profile:
+        if not h.get(name):
+            h[name] = value
+
+    if not ua or "chrom" not in ua:
+        h["User-Agent"] = DEFAULT_STREAMING_UA
+
+    ref, ori = _google_stream_refer_origin(url)
+    if not h.get("Referer"):
+        h["Referer"] = ref
+    if not h.get("Origin"):
+        rref = h.get("Referer") or ref
+        rp = urlparse(rref)
+        if rp.scheme and rp.hostname:
+            h["Origin"] = f"{rp.scheme}://{rp.hostname}"
+        else:
+            h["Origin"] = ori
 
 
 def create_session(
@@ -39,7 +111,7 @@ def create_session(
 
     # Headers padrão — sobrescritos por custom_headers quando fornecidos
     headers = {
-        "User-Agent": "Downloader/2.0",
+        "User-Agent": DEFAULT_STREAMING_UA,
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
@@ -134,7 +206,12 @@ def get_server_info(
         pass  # Prosseguir para fallback
 
     # --- Passo 2: GET com range mínimo (fallback) ---
-    if content_length is None or accept_ranges is None:
+    hostname = urlparse(url).hostname
+    # googlevideo não costuma responder 206 a sondagens com Range usando cliente script;
+    # o probe pode até retornar 403 enquanto o GET completo (como no browser) aceita.
+    if not _host_avoids_byte_range_probe(hostname) and (
+        content_length is None or accept_ranges is None
+    ):
         try:
             r2 = session.get(
                 url,

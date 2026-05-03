@@ -267,7 +267,10 @@ header {
 /* ── Media List ──────────────────────────────────────────────── */
 main {
   flex: 1;
+  /* Em popups de extensão não use 100vh no body — quebra o layout. Só main precisa disto para rolar. */
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 8px;
   display: flex;
   flex-direction: column;

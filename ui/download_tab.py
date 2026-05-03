@@ -149,11 +149,23 @@ class DownloadTab(QWidget):
             try:
                 data = json.loads(text)
                 url = data.get("url", "")
-                self.custom_headers = data.get("headers", {})
+                hdrs = dict(data.get("headers") or {})
+                page_url = (data.get("page_url") or "").strip()
+                if page_url.startswith("http"):
+                    lk = {str(k).lower() for k in hdrs.keys()}
+                    if "referer" not in lk:
+                        hdrs["Referer"] = page_url
+                    pu = urlparse(page_url)
+                    if pu.scheme and pu.hostname and "origin" not in lk:
+                        hdrs.setdefault("Origin", f"{pu.scheme}://{pu.hostname}")
+                self.custom_headers = hdrs
                 self.url_input.blockSignals(True)
                 self.url_input.setText(url)
                 self.url_input.blockSignals(False)
-                self.add_log("Headers customizados importados do interceptor.", "success")
+                self.add_log(
+                    "Dados da extensão importados (URL + headers da aba).",
+                    "success",
+                )
             except Exception:
                 pass
 
