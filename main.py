@@ -1,6 +1,6 @@
 """
 main.py
-Ponto de entrada do Downloader v2.0.
+Ponto de entrada do Downloader v2.1.
 """
 
 import multiprocessing

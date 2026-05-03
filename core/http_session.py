@@ -23,7 +23,7 @@ from core.constants import (
 # CDN de streaming costuma barrar UA de bot e responde igual ao navegador com Chrome UA.
 DEFAULT_STREAMING_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36 Downloader/2.0"
+    "Chrome/131.0.0.0 Safari/537.36 Downloader/2.1"
 )
 
 

@@ -67,7 +67,7 @@ class Updater:
     def __init__(self, current_version: str):
         """
         Parâmetros:
-            current_version : versão atual do app (ex: "2.0")
+            current_version : versão atual do app (ex: "2.1")
         """
         self.current_version = current_version
 
@@ -95,7 +95,7 @@ class Updater:
             UpdateCheckError se houver falha de rede ou resposta inválida,
             permitindo que o chamador exiba a mensagem correta ao usuário.
         """
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Downloader/2.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Downloader/2.1"}
         try:
             response = requests.get(self.VERSION_URL, headers=headers, timeout=10)
             response.raise_for_status()

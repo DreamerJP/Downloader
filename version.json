@@ -1,11 +1,9 @@
 {
-    "version": "2.0",
-    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v2.0/Downloader.exe",
+    "version": "2.1",
+    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v2.1/Downloader.exe",
     "changelog": [
-        "Nova arquitetura modular: sistema reescrito do zero para garantir 100% de estabilidade e velocidade.",
-        "Interface Renovada: Redesign visual da extensão para Chrome, tornando a navegação mais fluida e moderna.",
-        "Otimização de Performance: Motores de download agora operam de forma significativamente mais eficiente.",
-        "Segurança Reforçada: Implementação de novas camadas de proteção no processamento de dados.",
-        "Preparado para o Futuro: Código base modernizado, facilitando a chegada de novas funções em breve."
+        "Aprimoramento da extração e compatibilidade de headers para evitar bloqueios em streaming.",
+        "Nova extensão do Chrome (v4.3.2) capaz de exportar payload completo de metadados das abas.",
+        "Correções de estabilidade e melhorias no suporte a plataformas de vídeo."
     ]
 }
