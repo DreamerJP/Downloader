@@ -1,17 +1,15 @@
-# Downloader v2.0
+# Downloader
 
 Gerenciador de downloads multithread de alta performance com arquitetura modular, suporte nativo a HLS/M3U8 e integração profunda com o ecossistema Chrome.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-6.4+-41CD52.svg?style=flat&logo=qt&logoColor=white)](https://www.qt.io)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.0-green.svg?style=flat)](https://github.com/DreamerJP/Downloader/releases)
-
 ---
 
 ## Visão Geral
 
-O **Downloader v2.0** é uma reengenharia completa focada em performance bruta e estabilidade. Utiliza uma arquitetura multithread massiva com balanceamento dinâmico de carga, permitindo saturar conexões de alta velocidade enquanto mantém uma interface fluida e responsiva baseada no design system "Midnight Pro".
+O **Downloader** é uma reengenharia completa focada em performance bruta e estabilidade. Utiliza uma arquitetura multithread massiva com balanceamento dinâmico de carga, permitindo saturar conexões de alta velocidade enquanto mantém uma interface fluida e responsiva baseada no design system "Midnight Pro".
 
 ---
 
@@ -34,7 +32,7 @@ O **Downloader v2.0** é uma reengenharia completa focada em performance bruta e
 
 ---
 
-## Arquitetura Modular (v2.0)
+## Arquitetura Modular
 
 O projeto segue um padrão de separação de responsabilidades rigoroso:
 
