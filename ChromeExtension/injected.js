@@ -32,11 +32,16 @@
   } catch (_) {}
 
   // ── Filtros ─────────────────────────────────────────────────────
-  const MEDIA_EXT_RE = /\.(m3u8|mpd|mp4|webm|flv|ts|m4s|m4v|mkv|mov|aac|mp3|opus|f4v|f4a)([?#]|$)/i;
-  const MEDIA_CT_RE  = /(mpegurl|dash\+xml|video\/|audio\/mp4|audio\/aac|audio\/mpeg|audio\/ogg|audio\/opus|x-mpegurl|octet-stream)/i;
-  const IGNORE_RE    = /(doubleclick|googlesyndication|google-analytics|facebook\.com\/tr|\/ping\b|\/track\b|\/heartbeat|telemetry|thumbnail|thumb\/|\/poster|\/preview|storyboard|\/ad\/|adserver|pixel\.|beacon\.|analytics\.|\/stats\?|\/metrics\?|pagead|\.gif$|\.png$|\.jpg$|\.jpeg$|\.svg$|\.ico$|\.woff|\.ttf|\.css\b|\.js\b(?!on))/i;
-  const SEGMENT_RE   = /[_-](seg|segment|frag|chunk|part)[_-]?\d|\/seg\d|\/frag\d|\d{6,}\.ts$|\d{4,}\.m4s$/i;
-  const SEEN         = new Set();
+  const MEDIA_EXT_RE    = /\.(?:m3u8|mpd|mp4|webm|flv|m4v|mkv|mov|aac|mp3|opus|f4v|f4a)(?:[?#]|$)/i;
+  const MEDIA_CT_RE     = /(?:mpegurl|dash\+xml|video\/|audio\/(?:mp4|aac|mpeg|ogg|opus)|x-mpegurl|octet-stream)/i;
+  const IGNORE_RE       = /(?:doubleclick|googlesyndication|google-analytics|facebook\.com\/tr|\/ping\b|\/track\b|\/heartbeat|telemetry|thumbnail|thumb\/|\/poster|\/preview|storyboard|\/ad\/|adserver|pixel\.|beacon\.|analytics\.|\/stats\?|\/metrics\?|pagead|\.(?:gif|png|jpe?g|svg|ico|webp|avif|woff2?|ttf|eot|css)(?:[?#]|$))/i;
+
+  // Segmentos sempre filtrados — três classes:
+  const SEGMENT_EXT_RE  = /\.(?:ts|m4s|cmft|cmfa|cmfv|3gp)(?:[?#]|$)/i;
+  const SEGMENT_NAME_RE = /\/(?:seg|seq|segment|chunk|frag|fragment|part|piece|init)[\w-]*\.(?:mp4|m4s|m4a|m4v|ts|aac|cmf[atv])(?:[?#]|$)/i;
+  const SEGMENT_NUM_RE  = /[_\-\/]\d{2,}\.(?:ts|m4s|aac|m4a|cmf[atv])(?:[?#]|$)/i;
+
+  const SEEN = new Set();
 
   function isMedia(url, ct) {
     if (!url || url.length < 10) return false;
@@ -50,8 +55,7 @@
   }
 
   function isSegmentNoise(url) {
-    // Ignora segmentos individuais de HLS/DASH que não são master/index
-    return SEGMENT_RE.test(url) && !/master|index|playlist|manifest/i.test(url);
+    return SEGMENT_EXT_RE.test(url) || SEGMENT_NAME_RE.test(url) || SEGMENT_NUM_RE.test(url);
   }
 
   function report(url, type, label, extra) {

@@ -1,13 +1,14 @@
 // ============================================================
 //  popup.js — Downloader
 // ============================================================
+'use strict';
 
 document.addEventListener('DOMContentLoaded', () => {
-  // Exibe versão
   if (typeof EXT_VERSION !== 'undefined') {
     const vTag = document.getElementById('versionTag');
     if (vTag) vTag.textContent = `v${EXT_VERSION}`;
   }
+
   const listEl    = document.getElementById('mediaList');
   const countEl   = document.getElementById('mediaCount');
   const statusTxt = document.getElementById('statusText');
@@ -71,22 +72,25 @@ document.addEventListener('DOMContentLoaded', () => {
       groups.get(gk).variants.push(item);
     }
 
-    // Ordena variantes dentro de cada grupo: master/melhor qualidade primeiro
+    // Ordena: master primeiro, depois maior altura, depois maior bitrate
     for (const g of groups.values()) {
       g.variants.sort((a, b) => {
-        if (a.isMaster && !b.isMaster) return -1;
-        if (!a.isMaster && b.isMaster) return 1;
+        if (a.isMaster !== b.isMaster) return a.isMaster ? -1 : 1;
         const ha = a.height || 0, hb = b.height || 0;
         if (ha !== hb) return hb - ha;
-        const ba = a.bitrate || 0, bb = b.bitrate || 0;
-        return bb - ba;
+        return (b.bitrate || 0) - (a.bitrate || 0);
       });
-      // Formato primário = o da primeira variante (melhor qualidade)
       g.primaryFormat = g.variants[0].format;
       g.isLive = g.variants.some(v => v.isLive);
     }
 
-    return Array.from(groups.values());
+    // Ordena grupos: os com master/MP4 no topo, depois por timestamp
+    return Array.from(groups.values()).sort((a, b) => {
+      const am = a.variants[0].isMaster ? 1 : 0;
+      const bm = b.variants[0].isMaster ? 1 : 0;
+      if (am !== bm) return bm - am;
+      return b.timestamp - a.timestamp;
+    });
   }
 
   // ── Renderiza lista ────────────────────────────────────────
@@ -129,6 +133,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const filename = getFilename(primary.url);
     const fmtClass = 'fmt-' + (group.primaryFormat || 'Midia').replace(/[^a-zA-Z]/g, '');
 
+    // Qualidade resumo
+    const quality = primary.resolution
+                 || (primary.height ? primary.height + 'p' : null)
+                 || (primary.bitrate ? primary.bitrate + 'k' : null);
+
+    const variantCount = group.variants.length;
+
     // ── Head ──
     const head = document.createElement('div');
     head.className = 'card-head';
@@ -136,14 +147,18 @@ document.addEventListener('DOMContentLoaded', () => {
       <span class="fmt-tag ${fmtClass}">${esc(group.primaryFormat)}</span>
       <div class="card-title">
         <div class="card-filename" title="${esc(primary.url)}">${esc(filename)}</div>
-        <div class="card-host">${esc(hostname)}</div>
+        <div class="card-meta">
+          <span class="card-host">${esc(hostname)}</span>
+          ${quality ? `<span class="card-quality">${esc(quality)}</span>` : ''}
+          ${variantCount > 1 ? `<span class="card-variants">${variantCount} var</span>` : ''}
+        </div>
       </div>
       ${group.isLive ? '<span class="live-badge">AO VIVO</span>' : ''}
     `;
     card.appendChild(head);
 
-    // ── Dropdown de variantes (se houver mais de uma) ──
-    if (group.variants.length > 1) {
+    // ── Dropdown de variantes ──
+    if (variantCount > 1) {
       const varRow = document.createElement('div');
       varRow.className = 'variant-row';
 
@@ -160,7 +175,6 @@ document.addEventListener('DOMContentLoaded', () => {
       varRow.appendChild(sel);
       card.appendChild(varRow);
 
-      // Atualiza URL exibida e botões ao trocar variante
       sel.addEventListener('change', () => {
         const selected = group.variants[sel.value];
         updateCardUrl(card, selected);
@@ -177,45 +191,38 @@ document.addEventListener('DOMContentLoaded', () => {
     const actions = document.createElement('div');
     actions.className = 'card-actions';
     actions.innerHTML = `
-      <button class="btn-act btn-copy">
+      <button class="btn-act btn-copy" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="9" y="9" width="13" height="13" rx="2"/>
           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
         </svg>
-        Copiar URL
+        <span>Copiar URL</span>
       </button>
-      <button class="btn-act btn-open">
+      <button class="btn-act btn-open" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
           <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
         </svg>
-        Abrir
+        <span>Abrir</span>
       </button>
     `;
     card.appendChild(actions);
 
     // ── Eventos dos botões ──
     const copyBtn = actions.querySelector('.btn-copy');
+    const copyLabel = copyBtn.querySelector('span');
     copyBtn.addEventListener('click', () => {
       const url = getCurrentUrl(card, group);
       navigator.clipboard.writeText(url).then(() => {
         copyBtn.classList.add('copied');
-        copyBtn.innerHTML = `
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="20 6 9 17 4 12"/>
-          </svg>
-          Copiado!
-        `;
+        copyLabel.textContent = 'Copiado!';
         setTimeout(() => {
           copyBtn.classList.remove('copied');
-          copyBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2"/>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-            </svg>
-            Copiar URL
-          `;
-        }, 2000);
+          copyLabel.textContent = 'Copiar URL';
+        }, 1800);
+      }).catch(() => {
+        copyLabel.textContent = 'Erro';
+        setTimeout(() => { copyLabel.textContent = 'Copiar URL'; }, 1800);
       });
     });
 
@@ -243,13 +250,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function buildVariantLabel(v) {
     const parts = [];
-    if (v.resolution) parts.push(v.resolution);
-    else if (v.height) parts.push(v.height + 'p');
-    if (v.bitrate)  parts.push(v.bitrate + ' kbps');
+    if (v.resolution)     parts.push(v.resolution);
+    else if (v.height)    parts.push(v.height + 'p');
+    if (v.bitrate)        parts.push(v.bitrate + ' kbps');
     parts.push(v.format || 'Mídia');
-    if (v.isMaster) parts.push('★ master');
-    if (v.isAudio)  parts.push('Áudio');
-    if (v.contentLength) parts.push(formatBytes(v.contentLength));
+    if (v.isMaster)       parts.push('★ master');
+    if (v.isAudio)        parts.push('Áudio');
+    if (v.contentLength)  parts.push(formatBytes(v.contentLength));
     return parts.join('  ·  ');
   }
 
@@ -258,8 +265,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const obj = new URL(url);
       const parts = obj.pathname.split('/').filter(Boolean);
       const last = parts[parts.length - 1] || '';
-      if (last && last.includes('.')) return decodeURIComponent(last);
-      // Fallback: host + path resumido
+      if (last && last.includes('.')) {
+        try { return decodeURIComponent(last); } catch { return last; }
+      }
       return obj.hostname + (parts.length ? '/' + parts.slice(-2).join('/') : '');
     } catch {
       return url.substring(0, 40);
@@ -271,12 +279,12 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function esc(str) {
-    return String(str || '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
+    return String(str ?? '')
+      .replace(/&/g,  '&amp;')
+      .replace(/</g,  '&lt;')
+      .replace(/>/g,  '&gt;')
+      .replace(/"/g,  '&quot;')
+      .replace(/'/g,  '&#39;');
   }
 
   function formatBytes(b) {
@@ -291,10 +299,8 @@ document.addEventListener('DOMContentLoaded', () => {
     el.className = 'empty';
     el.innerHTML = `
       <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <path d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/>
-        <path d="M9 10l.01 0M15 10l.01 0"/>
-        <path d="M9.5 15.5a4 4 0 0 0 5 0"/>
-        <path d="M12 3v1M12 20v1M3 12h1M20 12h1"/>
+        <rect x="3" y="5" width="18" height="14" rx="2"/>
+        <path d="M10 9l5 3-5 3z" fill="currentColor" stroke="none"/>
       </svg>
       <div class="empty-title">Nenhuma mídia capturada</div>
       <div class="empty-hint">Recarregue a página e dê play no vídeo. A extensão intercepta o tráfego após ser ativada.</div>
