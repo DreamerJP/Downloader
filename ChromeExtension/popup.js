@@ -1,9 +1,13 @@
 // ============================================================
-//  popup.js — Downloader v4.0
-//  Agrupa variantes do mesmo vídeo em um único card com dropdown
+//  popup.js — Downloader
 // ============================================================
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Exibe versão
+  if (typeof EXT_VERSION !== 'undefined') {
+    const vTag = document.getElementById('versionTag');
+    if (vTag) vTag.textContent = `v${EXT_VERSION}`;
+  }
   const listEl    = document.getElementById('mediaList');
   const countEl   = document.getElementById('mediaCount');
   const statusTxt = document.getElementById('statusText');

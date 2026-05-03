@@ -1,14 +1,6 @@
 /**
- * injected.js — Downloader v4.0
+ * injected.js — Downloader
  * world: MAIN — roda antes de qualquer script da página.
- *
- * Melhorias v4:
- * - Proxy mais robusto para fetch, XHR, e HTMLMediaElement
- * - Intercepta WebSocket para streams via WS
- * - Captura de SourceBuffer para detectar MSE com URL real do segmento
- * - Intercepta createElement('video') e setAttribute para capturar src dinâmico
- * - Anti-detecção de DevTools aprimorado
- * - Desofusca URLs de streams populares (YouTube, Twitch etc.)
  */
 (function () {
   'use strict';
@@ -67,13 +59,16 @@
     const key = url.split('?')[0].split('#')[0];
     if (SEEN.has(key)) return;
     SEEN.add(key);
-    window.postMessage({
-      __djp4: true,
+    const msg = {
       url,
       type: type || '',
       label: label || document.title || location.hostname,
       ...(extra || {}),
-    }, '*');
+    };
+    if (typeof DJP_KEY !== 'undefined') msg[DJP_KEY] = true;
+    else msg.__djp4 = true;
+
+    window.postMessage(msg, '*');
   }
 
   // ── fetch Proxy ─────────────────────────────────────────────────
@@ -164,13 +159,16 @@
       apply(target, ms, args) {
         const mimeType = args[0] || '';
         if (MEDIA_CT_RE.test(mimeType)) {
-          window.postMessage({
-            __djp4: true,
+          const msg = {
             url: location.href,
             type: mimeType,
             label: document.title || location.hostname,
             isMSE: true,
-          }, '*');
+          };
+          if (typeof DJP_KEY !== 'undefined') msg[DJP_KEY] = true;
+          else msg.__djp4 = true;
+
+          window.postMessage(msg, '*');
         }
         return Reflect.apply(target, ms, args);
       },
@@ -186,12 +184,15 @@
         const ws = Reflect.construct(target, args);
         // Reporta apenas WS de media (wss:// de stream servers)
         if (/wss?:\/\/.*(stream|media|video|live|cdn|player)/i.test(url)) {
-          window.postMessage({
-            __djp4: true,
+          const msg = {
             url: url,
             type: 'websocket/stream',
             label: document.title || location.hostname,
-          }, '*');
+          };
+          if (typeof DJP_KEY !== 'undefined') msg[DJP_KEY] = true;
+          else msg.__djp4 = true;
+
+          window.postMessage(msg, '*');
         }
         return ws;
       },

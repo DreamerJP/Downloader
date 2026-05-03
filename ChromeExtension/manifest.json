@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Downloader",
-  "version": "4.0",
+  "version": "4.1",
   "description": "Captura de links de mídia para o gerenciador de downloads.",
   "icons": {
     "16": "icon16.png",
@@ -35,13 +35,13 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["injected.js"],
+      "js": ["version.js", "injected.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["version.js", "content.js"],
       "run_at": "document_start"
     }
   ]

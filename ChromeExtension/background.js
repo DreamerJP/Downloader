@@ -1,12 +1,10 @@
 // ============================================================
-//  Downloader — background.js  v4.1
-//  Correções principais:
-//  - Filtragem agressiva de segmentos HLS/DASH (seg-N, init-, .ts, .m4s)
-//  - Detecção mais conservadora de master playlist
-//  - Agrupamento por diretório (variantes do mesmo vídeo se juntam)
-//  - Cache anti-duplicidade entre onSendHeaders e onHeadersReceived
+//  Downloader — background.js
+//  Centralized version management
 // ============================================================
 'use strict';
+
+importScripts('version.js');
 
 const reqHeadersCache = new Map();
 const recentUrls      = new Map();   // url -> ts (anti-flood entre listeners)

@@ -1,12 +1,11 @@
 /**
- * content.js — Downloader v4.0
+ * content.js — Downloader
  * Isolated world — bridge entre injected.js (MAIN) e background.js.
- * Também faz scan DOM de fallback.
  */
 
 // ── Bridge: recebe do injected.js ──────────────────────────────
 window.addEventListener('message', (event) => {
-  if (!event.data || !event.data.__djp4) return;
+  if (!event.data || !event.data[typeof DJP_KEY !== 'undefined' ? DJP_KEY : '__djp4']) return;
   const { url, type, label, isMSE } = event.data;
   if (!url) return;
 
