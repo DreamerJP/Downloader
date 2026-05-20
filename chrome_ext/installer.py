@@ -87,13 +87,23 @@ class ChromeExtensionInstaller:
 
     def open_chrome_extensions(self):
         """Abre o Chrome na página de extensões."""
+        url = "chrome://extensions/"
         try:
-            url = "chrome://extensions/"
             if sys.platform == "win32":
-                os.startfile(url)
+                try:
+                    os.startfile(url)
+                except OSError:
+                    # Windows doesn't handle chrome:// protocol in startfile; fall back to cmd start chrome
+                    subprocess.Popen("start chrome chrome://extensions/", shell=True)
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", url])
+                try:
+                    subprocess.Popen(["open", "-a", "Google Chrome", url])
+                except Exception:
+                    subprocess.Popen(["open", url])
             else:
-                subprocess.Popen(["xdg-open", url])
+                try:
+                    subprocess.Popen(["google-chrome", url])
+                except Exception:
+                    subprocess.Popen(["xdg-open", url])
         except Exception:
             pass

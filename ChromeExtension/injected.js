@@ -5,31 +5,8 @@
 (function () {
   'use strict';
 
-  // ── Anti-DevTools ───────────────────────────────────────────────
+  // ── Hooks discretos de rede/DOM ─────────────────────────────────
   const _defineProperty = Object.defineProperty;
-  try {
-    _defineProperty(window, 'outerWidth',  { get: () => window.innerWidth,  configurable: true });
-    _defineProperty(window, 'outerHeight', { get: () => window.innerHeight, configurable: true });
-  } catch (_) {}
-
-  // Neutraliza verificações frequentes de tamanho de janela
-  const _origSetInterval = window.setInterval;
-  window.setInterval = new Proxy(_origSetInterval, {
-    apply(target, thisArg, args) {
-      const [fn, delay, ...rest] = args;
-      if (typeof fn === 'function' && typeof delay === 'number' && delay < 600) {
-        const wrapped = function () { try { fn(); } catch (_) {} };
-        return Reflect.apply(target, thisArg, [wrapped, delay, ...rest]);
-      }
-      return Reflect.apply(target, thisArg, args);
-    },
-  });
-
-  // Bloqueia console.clear (usado por alguns players para limpar evidências)
-  try {
-    const _cc = console.clear.bind(console);
-    _defineProperty(console, 'clear', { value: () => {}, writable: true, configurable: true });
-  } catch (_) {}
 
   // ── Filtros ─────────────────────────────────────────────────────
   const MEDIA_EXT_RE    = /\.(?:m3u8|mpd|mp4|webm|flv|m4v|mkv|mov|aac|mp3|opus|f4v|f4a)(?:[?#]|$)/i;
@@ -138,11 +115,6 @@
     });
   }
 
-  // ── HTMLMediaElement.currentSrc observer ────────────────────────
-  // Players modernos como Shaka, HLS.js atribuem currentSrc via objeto interno
-  const _currentSrcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentSrc');
-  // currentSrc é read-only, mas podemos monitorar via polling mínimo no scanDOM
-
   // ── setAttribute proxy para <video src="..."> dinâmico ──────────
   Element.prototype.setAttribute = new Proxy(Element.prototype.setAttribute, {
     apply(target, el, args) {
@@ -155,53 +127,6 @@
       return Reflect.apply(target, el, args);
     },
   });
-
-  // ── MediaSource (MSE) ────────────────────────────────────────────
-  if (window.MediaSource) {
-    // Captura o mimeType via addSourceBuffer
-    MediaSource.prototype.addSourceBuffer = new Proxy(MediaSource.prototype.addSourceBuffer, {
-      apply(target, ms, args) {
-        const mimeType = args[0] || '';
-        if (MEDIA_CT_RE.test(mimeType)) {
-          const msg = {
-            url: location.href,
-            type: mimeType,
-            label: document.title || location.hostname,
-            isMSE: true,
-          };
-          if (typeof DJP_KEY !== 'undefined') msg[DJP_KEY] = true;
-          else msg.__djp4 = true;
-
-          window.postMessage(msg, '*');
-        }
-        return Reflect.apply(target, ms, args);
-      },
-    });
-  }
-
-  // ── WebSocket intercept (para streams via WS) ────────────────────
-  const _OrigWS = window.WebSocket;
-  if (_OrigWS) {
-    window.WebSocket = new Proxy(_OrigWS, {
-      construct(target, args) {
-        const url = args[0] || '';
-        const ws = Reflect.construct(target, args);
-        // Reporta apenas WS de media (wss:// de stream servers)
-        if (/wss?:\/\/.*(stream|media|video|live|cdn|player)/i.test(url)) {
-          const msg = {
-            url: url,
-            type: 'websocket/stream',
-            label: document.title || location.hostname,
-          };
-          if (typeof DJP_KEY !== 'undefined') msg[DJP_KEY] = true;
-          else msg.__djp4 = true;
-
-          window.postMessage(msg, '*');
-        }
-        return ws;
-      },
-    });
-  }
 
   // ── DOM scan periódico ───────────────────────────────────────────
   function scanDOM() {

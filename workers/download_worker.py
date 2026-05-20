@@ -291,7 +291,7 @@ class DownloadWorker(QThread):
         # pode correr contra a extração de um subprocesso novo (resume),
         # já que PyInstaller usa `_MEI<pid_low_bits>` e PIDs do Windows
         # podem reusar os mesmos 20 bits inferiores. A limpeza acontece no
-        # próximo startup do app via cleanup_temp_meipass().
+        # próximo startup do app via cleanup_old_temp_dirs() em core/file_utils.py.
         if self._abandoned:
             return
         self._remove_partial_files()
@@ -318,19 +318,4 @@ class DownloadWorker(QThread):
             if os.path.isdir(TEMP_DIR) and not os.listdir(TEMP_DIR):
                 os.rmdir(TEMP_DIR)
         except OSError:
-            pass
-
-    def _remove_orphan_meipass(self) -> None:
-        """
-        PyInstaller extrai o bundle em `_MEI<rand>` no temp do SO. O bootloader
-        normalmente faz cleanup ao sair, mas terminate() não dá essa chance —
-        o folder fica órfão. Aqui apagamos o _MEI específico do processo filho
-        que reportou via Pipe ao iniciar.
-        """
-        meipass = self._child_meipass
-        if not meipass or not os.path.isdir(meipass):
-            return
-        try:
-            shutil.rmtree(meipass, ignore_errors=True)
-        except Exception:
             pass

@@ -106,7 +106,7 @@ class DynamicSegmentManager:
                 {
                     "start": s["start"],
                     "end": s["end"],
-                    "downloaded": s["current"] - s["start"],
+                    "downloaded": max(0, min(s["current"], s["end"] + 1) - s["start"]),
                     "active": s["status"] == "active",
                 }
                 for s in self.segments
@@ -119,9 +119,19 @@ class DynamicSegmentManager:
     def save_to_file(self, filepath: str) -> None:
         """Persiste o estado atual em JSON para permitir resume."""
         with self.lock:
+            payload = {
+                "version": 1,
+                "total_size": self.total_size,
+                "segments": [dict(s) for s in self.segments],
+            }
             try:
-                with open(filepath, "w", encoding="utf-8") as f:
-                    json.dump(self.segments, f)
+                os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+                tmp_path = f"{filepath}.tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, filepath)
             except OSError:
                 pass  # Falha silenciosa — não interromper o download
 
@@ -139,13 +149,54 @@ class DynamicSegmentManager:
             return None
         try:
             with open(filepath, "r", encoding="utf-8") as f:
-                segments = json.load(f)
+                payload = json.load(f)
+
+            if isinstance(payload, dict):
+                if int(payload.get("total_size", -1)) != total_size:
+                    return None
+                segments = payload.get("segments")
+            else:
+                # Compatibilidade com state.json antigo, que era apenas a lista.
+                segments = payload
 
             if not isinstance(segments, list) or not segments:
                 return None
 
-            # Validação de integridade: último segmento deve cobrir o arquivo inteiro
-            if segments[-1]["end"] != total_size - 1:
+            cleaned: list[dict] = []
+            for raw in segments:
+                if not isinstance(raw, dict):
+                    return None
+                start = int(raw["start"])
+                end = int(raw["end"])
+                current = int(raw.get("current", start))
+                if start < 0 or end < start or end >= total_size:
+                    return None
+                current = max(start, min(current, end + 1))
+
+                status = raw.get("status", "free")
+                if status == "done" and current >= end + 1:
+                    current = end + 1
+                else:
+                    # Qualquer trecho ativo, falhado ou parcialmente escrito
+                    # volta para a fila. Em resume é melhor rebaixar progresso
+                    # duvidoso do que pular bytes que talvez não chegaram ao disco.
+                    status = "free"
+
+                item = {
+                    "start": start,
+                    "end": end,
+                    "current": current,
+                    "status": status,
+                }
+                cleaned.append(item)
+
+            cleaned.sort(key=lambda s: s["start"])
+            expected_start = 0
+            for s in cleaned:
+                if s["start"] != expected_start:
+                    return None
+                expected_start = s["end"] + 1
+            if expected_start != total_size:
                 return None
 
             instance = cls.__new__(cls)
@@ -154,12 +205,8 @@ class DynamicSegmentManager:
             calc = total_size // 200
             instance.min_split_size = max(256 * 1024, min(calc, 4 * 1024 * 1024))
 
-            # Reverter 'active' → 'free': threads podem ter sido interrompidas
-            for s in segments:
-                if s.get("status") == "active":
-                    s["status"] = "free"
-            instance.segments = segments
+            instance.segments = cleaned
             return instance
 
-        except (json.JSONDecodeError, KeyError, OSError):
+        except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError):
             return None

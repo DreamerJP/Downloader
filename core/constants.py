@@ -11,6 +11,7 @@ LARGE_CHUNK_SIZE = 6 * 1024 * 1024   # 6 MB  — arquivos >= 100 MB
 # --- Política de retry ---
 RETRY_LIMIT   = 3    # tentativas máximas por parte/segmento
 RETRY_BACKOFF = 1.1  # base do backoff exponencial (segundos)
+PART_RECOVERY_LIMIT = 8  # rodadas extras para partes que falharam sem progresso
 
 # --- Paths temporários ---
 TEMP_DIR     = ".download_parts"

@@ -17,7 +17,7 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import Any
 
 
@@ -184,6 +184,7 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
 
     success = False
     final_path = ""
+    expected_total_size = None
     session = None
 
     try:
@@ -228,7 +229,7 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
         emitter.log(f"Destino: {final_path}", "info")
 
         if is_hls_url(url):
-            success = _run_hls(
+            success, final_path = _run_hls(
                 url, final_path, session, config, counter_proxy,
                 stop_event, pause_event, emitter, response_tracker,
             )
@@ -240,6 +241,7 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
             accept_ranges, total_size, _enc = get_server_info(
                 session, url, connect_timeout
             )
+            expected_total_size = total_size
             emitter.log(
                 f"Servidor: ranges={'sim' if accept_ranges == 'bytes' else 'não'}, "
                 f"tamanho={_fmt_size(total_size)}",
@@ -284,8 +286,13 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
                     emitter, response_tracker,
                 )
 
+        if success and expected_total_size is not None:
+            success = _verify_final_size(
+                final_path, expected_total_size, emitter.log
+            )
+
         if success and config.get("expected_checksum"):
-            _verify_checksum(
+            success = _verify_checksum(
                 final_path, config["expected_checksum"],
                 stop_event, emitter.log,
             )
@@ -321,7 +328,7 @@ def _run_swarm(
     counter_proxy, stop_event, pause_event, emitter, response_tracker,
 ) -> bool:
     import hashlib
-    from core.constants import TEMP_DIR
+    from core.constants import PART_RECOVERY_LIMIT, TEMP_DIR
     from core.file_utils import cleanup_temp_dir
     from core.segment_manager import DynamicSegmentManager
     from workers.swarm_worker import swarm_segment_worker
@@ -333,17 +340,27 @@ def _run_swarm(
     os.makedirs(part_dir, exist_ok=True)
     emitter.send("part_dir", part_dir)
 
-    # Pula pré-alocação se o arquivo já existe com tamanho correto (caso de
-    # retomada após pause).
-    need_prealloc = True
+    state_file = os.path.join(part_dir, "state.json")
+    resume_file_ok = False
     try:
         if os.path.isfile(output_path) and os.path.getsize(output_path) == total_size:
-            need_prealloc = False
+            resume_file_ok = True
             emitter.log("Arquivo pré-alocado encontrado — pulando alocação.", "info")
     except OSError:
         pass
 
-    if need_prealloc:
+    manager = None
+    if resume_file_ok:
+        manager = DynamicSegmentManager.load_from_file(state_file, total_size)
+        if manager:
+            emitter.log("Estado anterior encontrado — retomando download...", "info")
+    elif os.path.exists(state_file):
+        emitter.log(
+            "Estado anterior ignorado: arquivo parcial ausente ou com tamanho incompatível.",
+            "warning",
+        )
+
+    if not resume_file_ok:
         try:
             emitter.log(f"Pré-alocando {_fmt_size(total_size)} no disco...", "info")
             with open(output_path, "wb") as f:
@@ -354,57 +371,104 @@ def _run_swarm(
             emitter.log(f"Falha ao pré-alocar arquivo: {e}", "error")
             return False
 
-    state_file = os.path.join(part_dir, "state.json")
-    manager = DynamicSegmentManager.load_from_file(state_file, total_size)
-    if manager:
-        emitter.log("Estado anterior encontrado — retomando download...", "info")
-    else:
+    if manager is None:
         manager = DynamicSegmentManager(total_size)
+        manager.save_to_file(state_file)
 
     emitter.total_size(total_size)
     emitter.log(f"Disparando {num_threads} workers paralelos...", "info")
     file_lock = threading.Lock()
-    failed = False
+    hard_failed = 0
+    last_state_save = 0.0
+
+    def persist_state(force: bool = False) -> None:
+        nonlocal last_state_save
+        now = time.time()
+        if force or now - last_state_save >= 1.0:
+            manager.save_to_file(state_file)
+            last_state_save = now
+
+    def submit_available(executor, inflight: dict) -> int:
+        submitted = 0
+        while len(inflight) < num_threads and not stop_event.is_set():
+            seg = manager.get_work()
+            if seg is None:
+                break
+            future = executor.submit(
+                swarm_segment_worker,
+                url, seg, file_lock, output_path, session,
+                chunk_size, stop_event, pause_event,
+                counter_proxy, emitter.log,
+                response_tracker,
+            )
+            inflight[future] = seg
+            submitted += 1
+        if submitted:
+            emitter.segments_map(total_size, manager.get_map_data())
+        return submitted
 
     try:
         with ThreadPoolExecutor(max_workers=num_threads, thread_name_prefix="Swarm") as executor:
-            futures = []
-            for _ in range(num_threads):
-                seg = manager.get_work()
-                if seg is None:
-                    break
-                futures.append(executor.submit(
-                    swarm_segment_worker,
-                    url, seg, file_lock, output_path, session,
-                    chunk_size, stop_event, pause_event,
-                    counter_proxy, emitter.log,
-                    response_tracker,
-                ))
+            inflight: dict = {}
+            submit_available(executor, inflight)
+            persist_state(force=True)
 
-            while not stop_event.is_set():
-                seg = manager.get_work()
-                if seg is None:
+            while not stop_event.is_set() and not manager.is_complete():
+                if not inflight and submit_available(executor, inflight) == 0:
                     break
-                futures.append(executor.submit(
-                    swarm_segment_worker,
-                    url, seg, file_lock, output_path, session,
-                    chunk_size, stop_event, pause_event,
-                    counter_proxy, emitter.log,
-                    response_tracker,
-                ))
-                emitter.segments_map(total_size, manager.get_map_data())
 
-            for future in as_completed(futures):
-                if stop_event.is_set():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-                try:
-                    if not future.result():
-                        failed = True
-                except Exception as e:
-                    failed = True
-                    emitter.log(f"Worker error: {e}", "warning")
-                emitter.segments_map(total_size, manager.get_map_data())
+                done, _pending = wait(
+                    tuple(inflight.keys()),
+                    timeout=0.25,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    persist_state()
+                    emitter.segments_map(total_size, manager.get_map_data())
+                    continue
+
+                for future in done:
+                    seg = inflight.pop(future, None)
+                    if seg is None:
+                        continue
+
+                    ok = False
+                    err = None
+                    try:
+                        ok = bool(future.result())
+                    except Exception as e:
+                        err = e
+
+                    if ok or seg.get("current", seg["start"]) > seg["end"]:
+                        seg["status"] = "done"
+                        seg.pop("failures", None)
+                    else:
+                        failures = int(seg.get("failures", 0)) + 1
+                        seg["failures"] = failures
+                        if failures <= PART_RECOVERY_LIMIT:
+                            seg["status"] = "free"
+                            detail = f": {err}" if err else ""
+                            emitter.log(
+                                f"Repescando segmento ({failures}/{PART_RECOVERY_LIMIT}){detail}",
+                                "warning",
+                            )
+                        else:
+                            if seg.get("status") != "failed":
+                                hard_failed += 1
+                            seg["status"] = "failed"
+                            detail = f": {err}" if err else ""
+                            emitter.log(
+                                f"Segmento abandonado após repescagens{detail}",
+                                "error",
+                            )
+
+                    persist_state(force=True)
+                    emitter.segments_map(total_size, manager.get_map_data())
+
+                submit_available(executor, inflight)
+
+            if stop_event.is_set():
+                executor.shutdown(wait=False, cancel_futures=True)
 
     except Exception as e:
         emitter.log(f"Erro no Swarm: {e}", "error")
@@ -414,7 +478,7 @@ def _run_swarm(
     if stop_event.is_set():
         return False
 
-    if failed or not manager.is_complete():
+    if hard_failed or not manager.is_complete():
         manager.save_to_file(state_file)
         emitter.log(
             "Download Swarm incompleto. O arquivo final não será marcado como concluído.",
@@ -429,19 +493,19 @@ def _run_swarm(
 def _run_hls(
     url, output_path, session, config, counter_proxy,
     stop_event, pause_event, emitter, response_tracker,
-) -> bool:
+) -> tuple[bool, str]:
     """
     Executa download HLS: parseia playlist, baixa segmentos .ts em paralelo,
     descriptografa AES-128 e concatena em arquivo final.
     """
     import shutil
-    from core.constants import CHUNK_SIZE, TEMP_DIR
+    from core.constants import CHUNK_SIZE, PART_RECOVERY_LIMIT, TEMP_DIR
 
     try:
         import m3u8
     except ImportError:
         emitter.log("Módulo m3u8 não instalado. Execute: pip install m3u8", "error")
-        return False
+        return False, output_path
 
     emitter.log("Carregando playlist M3U8...", "info")
     try:
@@ -450,7 +514,7 @@ def _run_hls(
         playlist = m3u8.loads(r.text, uri=url)
     except Exception as e:
         emitter.log(f"Erro ao carregar playlist: {e}", "error")
-        return False
+        return False, output_path
 
     if playlist.is_variant:
         emitter.log(
@@ -460,7 +524,7 @@ def _run_hls(
         valid = [p for p in playlist.playlists if p.stream_info and p.stream_info.bandwidth]
         if not valid:
             emitter.log("Nenhuma stream válida encontrada.", "error")
-            return False
+            return False, output_path
         best = max(valid, key=lambda p: p.stream_info.bandwidth)
         res = getattr(best.stream_info, "resolution", None)
         emitter.log(f"Resolução selecionada: {res or 'Máxima'}", "success")
@@ -472,7 +536,7 @@ def _run_hls(
     segments = playlist.segments
     if not segments:
         emitter.log("Nenhum segmento encontrado na playlist.", "error")
-        return False
+        return False, output_path
 
     import hashlib as _hl
     out_hash = _hl.md5(output_path.encode("utf-8")).hexdigest()[:12]
@@ -492,7 +556,7 @@ def _run_hls(
         if getattr(k, "method", None) == "AES-128":
             key_bytes, key_info = _fetch_aes_key(session, k, emitter)
             if key_bytes is None:
-                return False
+                return False, output_path
 
     base_sequence = int(getattr(playlist, "media_sequence", 0) or 0)
     emitter.total_size({"mode": "segments", "total": len(segments)})
@@ -508,26 +572,35 @@ def _run_hls(
     )
 
     if failed and not stop_event.is_set():
-        emitter.log(f"Repescagem de {len(failed)} segmentos falhados...", "warning")
-        retry_parts = [(i, u) for i, u in parts if i in failed]
-        still_failed = _hls_download_parts(
-            retry_parts, part_dir, session, chunk_size,
-            min(len(retry_parts), 32),
-            key_bytes, key_info, base_sequence,
-            counter_proxy, stop_event, pause_event, emitter, response_tracker,
-        )
-        if not still_failed:
-            emitter.log("Repescagem concluída com sucesso!", "success")
-        else:
+        for recovery_round in range(1, PART_RECOVERY_LIMIT + 1):
             emitter.log(
-                f"{len(still_failed)} segmentos falharam permanentemente.",
+                f"Repescagem HLS {recovery_round}/{PART_RECOVERY_LIMIT}: "
+                f"{len(failed)} segmentos pendentes...",
+                "warning",
+            )
+            retry_parts = [(i, u) for i, u in parts if i in failed]
+            failed = _hls_download_parts(
+                retry_parts, part_dir, session, chunk_size,
+                max(1, min(len(retry_parts), 32)),
+                key_bytes, key_info, base_sequence,
+                counter_proxy, stop_event, pause_event, emitter, response_tracker,
+            )
+            if not failed:
+                emitter.log("Repescagem concluída com sucesso!", "success")
+                break
+            if stop_event.wait(min(1.5 ** recovery_round, 10)):
+                break
+
+        if failed and not stop_event.is_set():
+            emitter.log(
+                f"{len(failed)} segmentos falharam permanentemente.",
                 "error",
             )
-            return False
+            return False, output_path
 
     if stop_event.is_set():
         emitter.log("Download HLS cancelado.", "warning")
-        return False
+        return False, output_path
 
     missing = [
         i for i, _ in parts
@@ -538,7 +611,7 @@ def _run_hls(
         if len(missing) > 10:
             preview += ", ..."
         emitter.log(f"Segmentos ausentes após o download: {preview}", "error")
-        return False
+        return False, output_path
 
     emitter.log("Unificando segmentos...", "info")
     try:
@@ -547,13 +620,13 @@ def _run_hls(
                 seg_path = os.path.join(part_dir, f"segment_{i}.ts")
                 if not os.path.exists(seg_path):
                     emitter.log(f"Segmento {i} ausente: {seg_path}", "error")
-                    return False
+                    return False, output_path
                 with open(seg_path, "rb") as pf:
                     shutil.copyfileobj(pf, out, length=64 * 1024 * 1024)
         emitter.log("Unificação concluída!", "success")
     except OSError as e:
         emitter.log(f"Erro ao unificar segmentos: {e}", "error")
-        return False
+        return False, output_path
 
     if not output_path.lower().endswith(".ts"):
         from core.file_utils import make_unique_path as _mk_unique
@@ -562,6 +635,7 @@ def _run_hls(
             os.rename(output_path, new_path)
             # Avisa o pai que o arquivo final mudou de extensão — o histórico
             # precisa do caminho real para que cliques no item abram o arquivo.
+            output_path = new_path
             emitter.send("resolved_path", new_path)
         except OSError as e:
             emitter.log(f"Aviso: não foi possível renomear para .ts: {e}", "warning")
@@ -572,7 +646,7 @@ def _run_hls(
     except Exception:
         pass
 
-    return True
+    return True, output_path
 
 
 def _hls_download_parts(
@@ -626,11 +700,22 @@ def _hls_download_segment(
     url, filepath, index, session, chunk_size, key_bytes, key_info,
     base_sequence, counter_proxy, stop_event, pause_event, response_tracker,
 ) -> bool:
-    from core.constants import RETRY_LIMIT
+    from core.constants import CONNECT_TIMEOUT, READ_TIMEOUT, RETRY_LIMIT
 
-    if os.path.exists(filepath) and not key_bytes:
-        if os.path.getsize(filepath) > 0:
+    if os.path.exists(filepath):
+        try:
+            complete_size = os.path.getsize(filepath)
+        except OSError:
+            complete_size = 0
+        if complete_size > 0:
             return True
+
+    tmp_path = f"{filepath}.part"
+    try:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    except OSError:
+        pass
 
     attempt = 0
     while attempt < RETRY_LIMIT and not stop_event.is_set():
@@ -640,21 +725,41 @@ def _hls_download_segment(
         try:
             use_aes = key_bytes is not None and key_info is not None
             encrypted_buf = bytearray() if use_aes else None
+            expected_len = None
+            received = 0
 
-            with session.get(url, stream=True, timeout=(5, 10)) as r:
-                response_tracker.add(r)
+            with session.get(
+                url,
+                headers={"Accept-Encoding": "identity"},
+                stream=True,
+                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+            ) as r:
+                if response_tracker is not None:
+                    response_tracker.add(r)
                 try:
                     r.raise_for_status()
+                    raw_len = r.headers.get("Content-Length")
+                    if raw_len:
+                        try:
+                            expected_len = int(raw_len)
+                        except ValueError:
+                            expected_len = None
 
                     if encrypted_buf is None:
-                        with open(filepath, "wb") as f:
+                        with open(tmp_path, "wb") as f:
                             for chunk in r.iter_content(chunk_size):
                                 if stop_event.is_set():
+                                    try:
+                                        os.remove(tmp_path)
+                                    except OSError:
+                                        pass
                                     return False
                                 if not chunk:
                                     continue
                                 f.write(chunk)
+                                received += len(chunk)
                                 counter_proxy.add(len(chunk))
+                            f.flush()
                     else:
                         for chunk in r.iter_content(chunk_size):
                             if stop_event.is_set():
@@ -662,9 +767,16 @@ def _hls_download_segment(
                             if not chunk:
                                 continue
                             encrypted_buf.extend(chunk)
+                            received += len(chunk)
                             counter_proxy.add(len(chunk))
                 finally:
-                    response_tracker.remove(r)
+                    if response_tracker is not None:
+                        response_tracker.remove(r)
+
+            if expected_len is not None and received != expected_len:
+                raise IOError(
+                    f"segmento HLS truncado: {received} bytes, esperado {expected_len}"
+                )
 
             if encrypted_buf is not None:
                 from Crypto.Cipher import AES  # type: ignore
@@ -674,15 +786,18 @@ def _hls_download_segment(
                 pad_len = data[-1] if data else 0
                 if 0 < pad_len <= 16:
                     data = data[:-pad_len]
-                with open(filepath, "wb") as f:
+                with open(tmp_path, "wb") as f:
                     f.write(data)
+                    f.flush()
+
+            os.replace(tmp_path, filepath)
 
             return True
 
         except Exception:
             try:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
             except OSError:
                 pass
             if stop_event.is_set():
@@ -741,21 +856,47 @@ def _get_iv(key_info, base_sequence: int, index: int) -> bytes:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _verify_checksum(path, expected, stop_event, log_fn):
+def _verify_final_size(path, expected_size, log_fn) -> bool:
+    if expected_size is None:
+        return True
+    if not path or not os.path.exists(path):
+        log_fn("Arquivo final ausente após o download.", "error")
+        return False
+    try:
+        actual = os.path.getsize(path)
+    except OSError as e:
+        log_fn(f"Não foi possível validar tamanho final: {e}", "error")
+        return False
+    if actual == expected_size:
+        return True
+    log_fn(
+        f"Tamanho final inválido: esperado {_fmt_size(expected_size)}, obtido {_fmt_size(actual)}.",
+        "error",
+    )
+    return False
+
+
+def _verify_checksum(path, expected, stop_event, log_fn) -> bool:
     from core.file_utils import compute_sha256
-    if not expected or not path or not os.path.exists(path):
-        return
+    if not expected:
+        return True
+    if not path or not os.path.exists(path):
+        log_fn("Checksum não verificado: arquivo final ausente.", "error")
+        return False
     log_fn("Verificando checksum SHA256...", "info")
     digest = compute_sha256(path, stop_event, log_fn)
     if digest is None:
         log_fn("Verificação cancelada.", "warning")
+        return False
     elif digest.lower() == expected.lower():
         log_fn("✓ Checksum válido!", "success")
+        return True
     else:
         log_fn(
             f"✗ Checksum INVÁLIDO!\n  Esperado: {expected}\n  Obtido  : {digest}",
             "error",
         )
+        return False
 
 
 def _fmt_size(size) -> str:

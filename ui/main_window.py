@@ -521,7 +521,7 @@ class MainWindow(QMainWindow):
 
         from PyQt6.QtCore import QThread, pyqtSignal
 
-        class DownloadWorker(QThread):
+        class UpdateDownloadWorker(QThread):
             progress = pyqtSignal(str)
             finished = pyqtSignal(bool, str)
 
@@ -540,7 +540,7 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     self.finished.emit(False, str(e))
 
-        self._download_thread = DownloadWorker(self.updater, info["download_url"])
+        self._download_thread = UpdateDownloadWorker(self.updater, info["download_url"])
         self._download_thread.progress.connect(progress_dlg.update_progress)
         self._download_thread.progress.connect(lambda msg: self.download_tab.add_log(msg, "info"))
         self._download_thread.finished.connect(lambda success, msg: progress_dlg.finish(success, msg))

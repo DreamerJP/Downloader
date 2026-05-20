@@ -15,7 +15,7 @@ class AboutDialog(QDialog):
     def __init__(self, version: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Sobre o Downloader")
-        self.setFixedSize(450, 580)
+        self.setFixedSize(450, 600)
         self._init_ui(version)
 
     def _init_ui(self, version):
@@ -70,7 +70,31 @@ class AboutDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #0f1220;
+                width: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #1e2438;
+                min-height: 20px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #3d5aff;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                border: none;
+                background: none;
+                height: 0px;
+            }
+        """)
         
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
@@ -119,26 +143,50 @@ class AboutDialog(QDialog):
 
         # ── FOOTER ─────────────────────────────────────────────────────
         footer = QFrame()
-        footer.setStyleSheet("background: #0b0d14; border-top: 1px solid #1e2438; padding: 20px;")
+        footer.setObjectName("about_footer")
+        footer.setStyleSheet("""
+            QFrame#about_footer {
+                background: #0b0d14;
+                border-top: 1px solid #1e2438;
+            }
+        """)
         footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(25, 15, 25, 15)
+        footer_layout.setContentsMargins(25, 18, 25, 18)
         
         credits_layout = QVBoxLayout()
-        credits_layout.setSpacing(2)
+        credits_layout.setSpacing(4)
         
         author = QLabel("Desenvolvido por <b>DreamerJP</b>")
-        author.setStyleSheet("color: #5c6a94; font-size: 11px;")
+        author.setStyleSheet("color: #5c6a94; font-size: 11px; background: transparent; border: none; padding: 0;")
         credits_layout.addWidget(author)
         
         repo_link = QLabel('<a href="https://github.com/DreamerJP/Downloader" style="color: #3d5aff; text-decoration: none;">GitHub Repository</a>')
         repo_link.setOpenExternalLinks(True)
-        repo_link.setStyleSheet("font-size: 11px; font-weight: 600;")
+        repo_link.setStyleSheet("font-size: 11px; font-weight: 600; background: transparent; border: none; padding: 0;")
         credits_layout.addWidget(repo_link)
         footer_layout.addLayout(credits_layout)
 
         close_btn = QPushButton("Fechar")
         close_btn.setFixedWidth(90)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: #1e2438;
+                border: 1px solid #2e3856;
+                color: #ffffff;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #3d5aff;
+                border-color: #5c77ff;
+            }
+            QPushButton:pressed {
+                background: #2a43d1;
+            }
+        """)
         close_btn.clicked.connect(self.accept)
         footer_layout.addWidget(close_btn)
 
@@ -150,19 +198,20 @@ class AboutDialog(QDialog):
         h_box.setContentsMargins(0, 0, 0, 0)
         h_box.setSpacing(15)
 
-        # Marcador minimalista (linha vertical)
+        # Marcador minimalista (linha vertical) com altura máxima controlada para não esticar demais
         marker = QFrame()
         marker.setFixedWidth(2)
         marker.setMinimumHeight(30)
+        marker.setMaximumHeight(32)
         marker.setStyleSheet("background-color: #3d5aff; border-radius: 1px;")
-        h_box.addWidget(marker)
+        h_box.addWidget(marker, alignment=Qt.AlignmentFlag.AlignTop)
 
         v_box = QVBoxLayout()
         v_box.setContentsMargins(0, 0, 0, 0)
         v_box.setSpacing(4)
         
         t = QLabel(title_text)
-        t.setStyleSheet("color: #22c97a; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;")
+        t.setStyleSheet("color: #3d5aff; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;")
         v_box.addWidget(t)
         
         d = QLabel(desc_text)

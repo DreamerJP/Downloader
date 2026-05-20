@@ -19,7 +19,7 @@
   window.addEventListener('message', (event) => {
     const data = event.data;
     if (!data || !data[KEY]) return;
-    const { url, type, label, isMSE } = data;
+    const { url, type, label } = data;
     if (!url) return;
     if (isSegmentNoise(url)) return;
 
@@ -29,7 +29,6 @@
         url,
         contentType: type || 'video/intercepted',
         label: label || document.title || location.hostname,
-        isMediaSource: isMSE || false,
       });
     } catch (_) {}
   });
@@ -60,19 +59,10 @@
         }
       });
       el.querySelectorAll('source').forEach(src => {
-        if (src.src && !src.src.startsWith('blob:')) {
+        if (src.src && !src.src.startsWith('blob:') && !src.src.startsWith('data:')) {
           reportDOM(src.src, src.type || 'video/dom', document.title);
         }
       });
-    });
-
-    // iframes de players
-    document.querySelectorAll('iframe').forEach(f => {
-      try {
-        if (f.src && /player|embed|video|stream|watch/i.test(f.src) && f.src.startsWith('http')) {
-          reportDOM(f.src, 'text/html', 'iframe:' + document.title);
-        }
-      } catch (_) {}
     });
 
     // Links diretos para mídia

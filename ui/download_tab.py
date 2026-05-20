@@ -25,6 +25,7 @@ class DownloadTab(QWidget):
         super().__init__(parent)
         self._init_ui()
         self.custom_headers = {}
+        self._last_loaded_json_url = None
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -159,6 +160,7 @@ class DownloadTab(QWidget):
                     if pu.scheme and pu.hostname and "origin" not in lk:
                         hdrs.setdefault("Origin", f"{pu.scheme}://{pu.hostname}")
                 self.custom_headers = hdrs
+                self._last_loaded_json_url = url
                 self.url_input.blockSignals(True)
                 self.url_input.setText(url)
                 self.url_input.blockSignals(False)
@@ -168,6 +170,12 @@ class DownloadTab(QWidget):
                 )
             except Exception:
                 pass
+        else:
+            if text != self._last_loaded_json_url:
+                if self.custom_headers:
+                    self.custom_headers = {}
+                    self._last_loaded_json_url = None
+                    self.add_log("Headers customizados limpos (nova URL inserida).", "info")
 
         if not self.path_input.text() and self.url_input.text():
             url = self.url_input.text()

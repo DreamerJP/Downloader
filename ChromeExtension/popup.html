@@ -15,12 +15,7 @@
       <small id="versionTag" class="version-tag"></small>
     </div>
     <div class="header-right">
-      <label class="tab-toggle" title="Filtrar pela aba atual">
-        <input type="checkbox" id="currentTabOnly" checked>
-        <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        <span class="toggle-label">Aba atual</span>
-      </label>
-      <button id="clearBtn" class="icon-btn danger" title="Limpar lista">
+      <button id="clearBtn" class="icon-btn danger" title="Limpar capturas desta aba">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
           <path d="M2 4h12M6 4V2.5a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5V4M5 4l.5 9.5h5L11 4"/>
         </svg>
@@ -34,7 +29,6 @@
       <span id="statusText">Aguardando...</span>
     </div>
     <div class="filters" id="filterPills">
-      <button class="chip active" data-filter="all">Todos</button>
       <button class="chip" data-filter="HLS">HLS</button>
       <button class="chip" data-filter="DASH">DASH</button>
       <button class="chip" data-filter="MP4">MP4</button>

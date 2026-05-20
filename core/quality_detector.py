@@ -93,21 +93,36 @@ def _check_url_exists(session: requests.Session, url: str, timeout: float = 2.0)
 
 def _generate_quality_variations(url: str) -> list[str]:
     """
-    Gera variações de URL substituindo indicadores de qualidade conhecidos.
+    Gera variações de URL substituindo indicadores de qualidade conhecidos apenas no PATH.
+    Evita alterar parâmetros de query string (tokens, chaves de autenticação).
     Retorna lista com a URL original + variações únicas.
     """
+    from urllib.parse import urlunparse
     variations: list[str] = [url]
+
+    try:
+        parsed = urlparse(url)
+        path = parsed.path
+        if not path:
+            return variations
+    except Exception:
+        return variations
 
     # Padrões: 360p, 1080p, 4K, etc.
     pattern = re.compile(r"(\d{3,4}p|4K)", re.IGNORECASE)
 
-    if not pattern.search(url):
-        return variations  # URL sem indicador de qualidade detectável
+    if not pattern.search(path):
+        return variations  # URL sem indicador de qualidade detectável no PATH
 
     for quality in VIDEO_QUALITIES:
-        candidate = pattern.sub(quality, url)
-        if candidate != url and candidate not in variations:
-            variations.append(candidate)
+        new_path = pattern.sub(quality, path)
+        if new_path != path:
+            try:
+                candidate = urlunparse(parsed._replace(path=new_path))
+                if candidate != url and candidate not in variations:
+                    variations.append(candidate)
+            except Exception:
+                pass
 
     return variations
 
@@ -178,9 +193,16 @@ def find_best_quality_url(
     best_idx = -1
 
     for url in available:
-        url_lower = url.lower()
+        try:
+            parsed = urlparse(url)
+            path_lower = (parsed.path or "").lower()
+        except Exception:
+            continue
         for i, quality in enumerate(VIDEO_QUALITIES):
-            if quality.lower() in url_lower and i > best_idx:
+            q_lower = quality.lower()
+            # Limite estrito de palavra para evitar correspondências com letras dentro de chaves/tokens
+            pattern = re.compile(rf"(?:^|[^a-zA-Z0-9]){re.escape(q_lower)}(?:$|[^a-zA-Z0-9])")
+            if pattern.search(path_lower) and i > best_idx:
                 best_idx = i
                 best_url = url
                 break

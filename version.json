@@ -1,9 +1,11 @@
 {
-    "version": "2.1",
-    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v2.1/Downloader.exe",
+    "version": "2.2",
+    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v2.2/Downloader.exe",
     "changelog": [
-        "Aprimoramento da extração e compatibilidade de headers para evitar bloqueios em streaming.",
-        "Nova extensão do Chrome (v4.3.2) capaz de exportar payload completo de metadados das abas.",
-        "Correções de estabilidade e melhorias no suporte a plataformas de vídeo."
+        "Correção crítica de segurança em links com tokens criptográficos para evitar erros 403.",
+        "Downloads paralelos ultra rápidos ativados por padrão para links do YouTube e Blogger.",
+        "Correção do cálculo do tempo restante para downloads de transmissão de vídeo (M3U8).",
+        "Resolução de falha silenciosa de abertura de extensões no Windows.",
+        "Fim completo da criação de pastas indesejadas '__pycache__' e limpeza geral do projeto."
     ]
 }

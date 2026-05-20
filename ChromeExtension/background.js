@@ -7,7 +7,9 @@
 importScripts('version.js');
 
 const reqHeadersCache = new Map();
-const recentUrls      = new Map();   // url -> ts (anti-flood entre listeners)
+const recentUrls      = new Map();   // tab+url -> ts (anti-flood entre listeners)
+const MAX_ITEMS_PER_TAB = 80;
+const MAX_TOTAL_ITEMS   = 300;
 
 // ── Padrões de ruído (publicidade, telemetria, assets estáticos) ─
 const IGNORE_RE = new RegExp([
@@ -44,12 +46,13 @@ const isSegmentNoise = (url) =>
   SEGMENT_EXT_RE.test(url) || SEGMENT_NAME_RE.test(url) || SEGMENT_NUM_RE.test(url);
 const tryParseUrl    = (url) => { try { return new URL(url); } catch { return null; } };
 
-function isRecentlySeen(url) {
+function isRecentlySeen(url, tabId) {
   const now = Date.now();
-  const last = recentUrls.get(url);
+  const recentKey = `${tabId}::${dedupeKey(url)}`;
+  const last = recentUrls.get(recentKey);
   if (last && now - last < 8000) return true;
-  recentUrls.set(url, now);
-  if (recentUrls.size > 500) {
+  recentUrls.set(recentKey, now);
+  if (recentUrls.size > 800) {
     const cutoff = now - 30000;
     for (const [k, v] of recentUrls) if (v < cutoff) recentUrls.delete(k);
   }
@@ -154,12 +157,8 @@ chrome.webRequest.onSendHeaders.addListener(
       for (const h of details.requestHeaders) reqHeaders[h.name.toLowerCase()] = h.value;
     }
 
-    if (isVideoUrl(details.url)) {
-      saveMedia(details.url, 'video/media', reqHeaders, details.tabId, details.initiator || '');
-    } else {
-      reqHeadersCache.set(details.requestId, reqHeaders);
-      setTimeout(() => reqHeadersCache.delete(details.requestId), 20000);
-    }
+    reqHeadersCache.set(details.requestId, reqHeaders);
+    setTimeout(() => reqHeadersCache.delete(details.requestId), 20000);
   },
   { urls: ['<all_urls>'] },
   ['requestHeaders', 'extraHeaders']
@@ -169,6 +168,7 @@ chrome.webRequest.onSendHeaders.addListener(
 chrome.webRequest.onHeadersReceived.addListener(
   function (details) {
     if (isIgnored(details.url) || isSegmentNoise(details.url)) return;
+    if (details.statusCode && (details.statusCode < 200 || details.statusCode >= 400)) return;
 
     let contentType = '', contentLength = null;
     if (details.responseHeaders) {
@@ -180,7 +180,7 @@ chrome.webRequest.onHeadersReceived.addListener(
     }
 
     let isVideo = isVideoCT(contentType);
-    if (!isVideo && contentType.includes('octet-stream') && isVideoUrl(details.url)) isVideo = true;
+    if (!isVideo && isVideoUrl(details.url)) isVideo = true;
     if (!isVideo) return;
 
     const reqHeaders = reqHeadersCache.get(details.requestId) || {};
@@ -193,13 +193,20 @@ chrome.webRequest.onHeadersReceived.addListener(
 // ── Mensagens do content.js ─────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'domVideo') {
-    if (!request.url || isSegmentNoise(request.url)) {
+    const type = request.contentType || 'video/dom';
+    const tabUrl = sender.tab ? sender.tab.url : '';
+    if (
+      !request.url ||
+      isSegmentNoise(request.url) ||
+      (!isVideoUrl(request.url) && !isVideoCT(type)) ||
+      (sameUrlNoHash(request.url, tabUrl) && !isVideoUrl(request.url))
+    ) {
       sendResponse({ status: 'ignored' });
       return true;
     }
     const tabId     = sender.tab ? sender.tab.id : -1;
-    const initiator = sender.tab ? sender.tab.url : '';
-    saveMedia(request.url, request.contentType || 'video/dom', {}, tabId, initiator, null, request.label);
+    const initiator = tabUrl || '';
+    saveMedia(request.url, type, {}, tabId, initiator, null, request.label);
     sendResponse({ status: 'ok' });
     return true;
   }
@@ -217,10 +224,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const tabId = request.tabId;
     chrome.storage.local.get({ capturedMedia: [] }, result => {
       const filtered = result.capturedMedia.filter(m => m.tabId !== tabId);
-      chrome.storage.local.set({ capturedMedia: filtered });
-      try { chrome.action.setBadgeText({ text: '', tabId }); } catch (_) {}
+      chrome.storage.local.set({ capturedMedia: filtered }, () => {
+        try { chrome.action.setBadgeText({ text: '', tabId }); } catch (_) {}
+        sendResponse({ status: 'ok' });
+      });
     });
-    sendResponse({ status: 'ok' });
     return true;
   }
 });
@@ -239,23 +247,31 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // ── Salva mídia ─────────────────────────────────────────────────
 function saveMedia(url, type, headers, tabId, initiator, contentLength, domLabel) {
   if (!url || url.length < 12) return;
+  if (tabId < 0) return;
   if (isIgnored(url) || isSegmentNoise(url)) return;
-  if (isRecentlySeen(url)) return;
+  if (!isVideoUrl(url) && !isVideoCT(type || '')) return;
+  if (isRecentlySeen(url, tabId)) return;
 
   const key      = dedupeKey(url);
   const groupKey = videoGroupKey(url, tabId);
   const info     = extractMediaInfo(url, type || '');
+  const cleanHeaders = headers && typeof headers === 'object' ? headers : {};
 
   function processMedia(tabTitle, pageUrl) {
     chrome.storage.local.get({ capturedMedia: [] }, function (result) {
-      let media = result.capturedMedia;
+      let media = Array.isArray(result.capturedMedia)
+        ? result.capturedMedia.filter(m => m && typeof m.url === 'string')
+        : [];
 
       const idx = media.findIndex(m => m.key === key);
       if (idx !== -1) {
-        if (Object.keys(headers).length > 0) {
-          media[idx].headers = { ...media[idx].headers, ...headers };
-          chrome.storage.local.set({ capturedMedia: media });
+        if (Object.keys(cleanHeaders).length > 0) {
+          media[idx].headers = { ...media[idx].headers, ...cleanHeaders };
         }
+        media[idx].timestamp = Date.now();
+        media[idx].tabTitle = tabTitle || media[idx].tabTitle || 'Desconhecido';
+        media[idx].pageUrl = pageUrl || media[idx].pageUrl || '';
+        chrome.storage.local.set({ capturedMedia: trimMedia(media) });
         return;
       }
 
@@ -265,7 +281,7 @@ function saveMedia(url, type, headers, tabId, initiator, contentLength, domLabel
         resolution: info.resolution, height: info.height, bitrate: info.bitrate,
         isMaster: info.isMaster, isAudio: info.isAudio, isLive: info.isLive,
         contentLength: contentLength || null,
-        headers, initiator: initiator || '',
+        headers: cleanHeaders, initiator: initiator || '',
         timestamp: Date.now(),
         tabId, tabTitle: tabTitle || 'Desconhecido', pageUrl: pageUrl || '',
         domLabel: domLabel || null,
@@ -274,7 +290,7 @@ function saveMedia(url, type, headers, tabId, initiator, contentLength, domLabel
       if (info.isMaster || info.format === 'MP4' || info.format === 'WEBM') media.unshift(entry);
       else media.push(entry);
 
-      if (media.length > 200) media = media.slice(0, 200);
+      media = trimMedia(media);
       chrome.storage.local.set({ capturedMedia: media });
 
       if (tabId >= 0) {
@@ -288,12 +304,38 @@ function saveMedia(url, type, headers, tabId, initiator, contentLength, domLabel
     });
   }
 
-  if (tabId < 0) {
-    processMedia('Background', '');
-  } else {
-    chrome.tabs.get(tabId, tab => {
-      if (chrome.runtime.lastError) processMedia('Aba Desconhecida', '');
-      else processMedia(tab ? tab.title : 'Aba Desconhecida', tab ? tab.url : '');
-    });
+  chrome.tabs.get(tabId, tab => {
+    if (chrome.runtime.lastError) processMedia('Aba Desconhecida', '');
+    else processMedia(tab ? tab.title : 'Aba Desconhecida', tab ? tab.url : '');
+  });
+}
+
+function trimMedia(media) {
+  const byTab = new Map();
+  const sorted = media
+    .filter(m => m && typeof m.url === 'string' && Number.isInteger(m.tabId) && m.tabId >= 0)
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+  const kept = [];
+  for (const item of sorted) {
+    const count = byTab.get(item.tabId) || 0;
+    if (count >= MAX_ITEMS_PER_TAB) continue;
+    byTab.set(item.tabId, count + 1);
+    kept.push(item);
+    if (kept.length >= MAX_TOTAL_ITEMS) break;
+  }
+  return kept;
+}
+
+function sameUrlNoHash(a, b) {
+  if (!a || !b) return false;
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    ua.hash = '';
+    ub.hash = '';
+    return ua.toString() === ub.toString();
+  } catch (_) {
+    return String(a).split('#')[0] === String(b).split('#')[0];
   }
 }

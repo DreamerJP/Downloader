@@ -226,8 +226,12 @@ class SpeedCalculator:
     def _get_eta_seconds(self, speed: float) -> float | None:
         if self.progress_mode == "segments":
             remaining = self.total_segments - self.completed_segments
-            if remaining > 0 and speed > 0 and self.total_bytes_target > 0:
-                return (remaining * (self.total_bytes_target / self.total_segments)) / speed
+            if remaining > 0 and speed > 0:
+                if self.total_bytes_target > 0:
+                    return (remaining * (self.total_bytes_target / self.total_segments)) / speed
+                elif self.completed_segments > 0:
+                    avg_segment_bytes = self._total_confirmed_bytes / self.completed_segments
+                    return (remaining * avg_segment_bytes) / speed
             return None
         if self.total_bytes_target <= 0 or speed <= 0:
             return None

@@ -39,7 +39,8 @@ O projeto segue um padrão de separação de responsabilidades rigoroso:
 - **core/**: O motor da aplicação. Contém a lógica de segmentação, cálculos de telemetria, detecção de qualidade e persistência de histórico.
 - **ui/**: Camada de interface. Componentes desacoplados, diálogos modernos e o design system centralizado em theme.py.
 - **workers/**: Orquestração de threads. Gerencia o ciclo de vida dos downloads, atualizações de sistema e tarefas de background.
-- **chrome_ext/**: Código fonte da extensão que alimenta o sistema de captura.
+- **ChromeExtension/**: Código fonte da extensão do Chrome que realiza a captura de links de mídia.
+- **chrome_ext/**: Lógica interna do aplicativo para instalação, desinstalação e gerenciamento da extensão.
 
 ---
 

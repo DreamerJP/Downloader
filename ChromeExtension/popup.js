@@ -14,28 +14,29 @@ document.addEventListener('DOMContentLoaded', () => {
   const statusTxt = document.getElementById('statusText');
   const statusDot = document.getElementById('statusDot');
   const clearBtn  = document.getElementById('clearBtn');
-  const tabToggle = document.getElementById('currentTabOnly');
   const pills     = document.getElementById('filterPills');
 
-  let activeFilter = 'all';
+  let activeFilter = null;
   let currentTabId = -1;
   let allMedia     = [];
 
   // ── Filtros ────────────────────────────────────────────────
   pills.querySelectorAll('.chip').forEach(chip => {
     chip.addEventListener('click', () => {
+      const nextFilter = chip.classList.contains('active') ? null : chip.dataset.filter;
       pills.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
-      chip.classList.add('active');
-      activeFilter = chip.dataset.filter;
+      if (nextFilter) chip.classList.add('active');
+      activeFilter = nextFilter;
       renderList();
     });
   });
 
-  tabToggle.addEventListener('change', updateList);
-
   clearBtn.addEventListener('click', () => {
-    const action = tabToggle.checked ? 'clearTab' : 'clear';
-    chrome.runtime.sendMessage({ action, tabId: currentTabId }, () => updateList());
+    if (currentTabId < 0) return;
+    chrome.runtime.sendMessage(
+      { action: 'clearTab', tabId: currentTabId },
+      () => updateList()
+    );
   });
 
   // ── Carrega dados ──────────────────────────────────────────
@@ -43,10 +44,8 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
       currentTabId = tabs[0] ? tabs[0].id : -1;
       chrome.storage.local.get({ capturedMedia: [] }, result => {
-        allMedia = result.capturedMedia;
-        if (tabToggle.checked && currentTabId >= 0) {
-          allMedia = allMedia.filter(m => m.tabId === currentTabId);
-        }
+        allMedia = normalizeMediaItems(result.capturedMedia)
+          .filter(m => m.tabId === currentTabId);
         renderList();
       });
     });
@@ -58,6 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     for (const item of items) {
       const gk = item.groupKey || item.key;
+      if (!gk || !item.url) continue;
       if (!groups.has(gk)) {
         groups.set(gk, {
           groupKey: gk,
@@ -97,7 +97,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderList() {
     let media = allMedia;
 
-    if (activeFilter !== 'all') {
+    if (activeFilter) {
       media = media.filter(m => {
         if (activeFilter === 'Áudio') return m.isAudio;
         return m.format === activeFilter;
@@ -110,13 +110,13 @@ document.addEventListener('DOMContentLoaded', () => {
     listEl.innerHTML = '';
 
     if (groups.length === 0) {
-      statusTxt.textContent = 'Aguardando tráfego...';
+      statusTxt.textContent = activeFilter ? `Sem ${activeFilter} nesta aba` : 'Aguardando tráfego nesta aba...';
       statusDot.className = 'dot';
       listEl.appendChild(buildEmpty());
       return;
     }
 
-    statusTxt.textContent = 'Interceptação ativa';
+    statusTxt.textContent = activeFilter ? `Filtrando ${activeFilter}` : 'Capturas da aba atual';
     statusDot.className = 'dot active';
 
     groups.forEach(g => listEl.appendChild(buildCard(g)));
@@ -328,6 +328,48 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateCardUrl(card, variant) {
     const urlEl = card.querySelector('.card-url');
     if (urlEl) urlEl.textContent = variant.url;
+    const fileEl = card.querySelector('.card-filename');
+    if (fileEl) {
+      fileEl.textContent = getFilename(variant.url);
+      fileEl.title = variant.url;
+    }
+  }
+
+  function normalizeMediaItems(items) {
+    if (!Array.isArray(items)) return [];
+    return items
+      .filter(item => item && typeof item === 'object')
+      .filter(item => typeof item.url === 'string' && /^https?:\/\//i.test(item.url))
+      .filter(item => Number.isInteger(item.tabId) && item.tabId >= 0)
+      .filter(isDisplayableMedia)
+      .map(item => ({
+        ...item,
+        timestamp: Number(item.timestamp) || 0,
+        format: item.format || 'Mídia',
+        headers: item.headers && typeof item.headers === 'object' ? item.headers : {},
+      }));
+  }
+
+  function isDisplayableMedia(item) {
+    const url = item.url || '';
+    const mime = String(item.mime || '').toLowerCase();
+    const format = String(item.format || '');
+    const sameAsPage = stripHash(url) === stripHash(item.pageUrl || '');
+    const hasMediaExt = /\.(?:m3u8|mpd|mp4|webm|flv|m4v|mkv|mov|aac|mp3|opus|f4v|f4a)(?:[?#]|$)/i.test(url);
+
+    if (mime.includes('text/html')) return false;
+    if (sameAsPage && !hasMediaExt) return false;
+    return hasMediaExt || /^(?:video|audio)\//.test(mime) || /mpegurl|dash\+xml|x-mpegurl/.test(mime) || format !== 'Mídia';
+  }
+
+  function stripHash(url) {
+    try {
+      const obj = new URL(url);
+      obj.hash = '';
+      return obj.toString();
+    } catch (_) {
+      return String(url || '').split('#')[0];
+    }
   }
 
   function buildVariantLabel(v) {
@@ -385,7 +427,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <path d="M10 9l5 3-5 3z" fill="currentColor" stroke="none"/>
       </svg>
       <div class="empty-title">Nenhuma mídia capturada</div>
-      <div class="empty-hint">Recarregue a página e dê play no vídeo. A extensão intercepta o tráfego após ser ativada.</div>
+      <div class="empty-hint">Recarregue a página e dê play no vídeo. As capturas aparecem apenas para a aba atual.</div>
     `;
     return el;
   }

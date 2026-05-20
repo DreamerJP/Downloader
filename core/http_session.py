@@ -113,7 +113,9 @@ def create_session(
     headers = {
         "User-Agent": DEFAULT_STREAMING_UA,
         "Accept": "*/*",
-        "Accept-Encoding": "gzip, deflate, br",
+        # Byte ranges só são seguros quando servidor e cliente falam dos
+        # mesmos bytes do arquivo final, sem descompressão transparente.
+        "Accept-Encoding": "identity",
         "Connection": "keep-alive",
     }
     if custom_headers:
@@ -207,11 +209,10 @@ def get_server_info(
 
     # --- Passo 2: GET com range mínimo (fallback) ---
     hostname = urlparse(url).hostname
-    # googlevideo não costuma responder 206 a sondagens com Range usando cliente script;
-    # o probe pode até retornar 403 enquanto o GET completo (como no browser) aceita.
-    if not _host_avoids_byte_range_probe(hostname) and (
-        content_length is None or accept_ranges is None
-    ):
+    # Sempre tenta a sonda GET com range se o HEAD não obteve as informações necessárias.
+    # CDNs do Google Video com headers de compatibilidade de streaming respondem 206 com sucesso,
+    # revelando o tamanho total do arquivo e aceitando ranges.
+    if content_length is None or accept_ranges is None:
         try:
             r2 = session.get(
                 url,
@@ -229,6 +230,10 @@ def get_server_info(
                         content_length = int(content_range.split("/")[-1])
                     except ValueError:
                         pass
+            elif r2.status_code == 403 and _host_avoids_byte_range_probe(hostname):
+                # Se ainda assim retornar 403 especificamente para o Google Video,
+                # nós sabemos que o host suporta Ranges, mas o probe de 1 byte foi barrado.
+                accept_ranges = "bytes"
             else:
                 raw_len = r2.headers.get("Content-Length")
                 if raw_len and content_length is None:
@@ -242,6 +247,8 @@ def get_server_info(
 
             r2.close()
         except Exception:
-            pass
+            # Em caso de falha de conexão/timeout no probe do Google Video, assume suporte de range
+            if _host_avoids_byte_range_probe(hostname):
+                accept_ranges = "bytes"
 
     return accept_ranges, content_length, content_encoding

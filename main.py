@@ -11,6 +11,9 @@ import ctypes
 # Adiciona o diretório atual ao sys.path para garantir que os pacotes locais sejam encontrados
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Impede a criação de pastas __pycache__ e arquivos .pyc compilados
+sys.dont_write_bytecode = True
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
 
