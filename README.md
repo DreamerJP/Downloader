@@ -16,10 +16,10 @@ O **Downloader** é uma reengenharia completa focada em performance bruta e esta
 ## Principais Diferenciais Técnicos
 
 ### Performance de Próxima Geração
-- **Paralelismo Massivo**: Suporte a até 512 conexões simultâneas por download.
-- **Otimização L3 Cache (X3D)**: Algoritmo de segmentação adaptativa (256KB a 32MB) projetado para minimizar cache misses em CPUs modernas.
-- **Zero-Disk Overhead**: Sistema de RAM Merging para arquivos até 300MB, processando a união de segmentos inteiramente em memória para máxima velocidade e preservação do SSD.
-- **Telemetria via NIC**: Monitoramento de velocidade em tempo real via contadores de hardware (PSUtil), garantindo precisão absoluta sem sobrecarregar as threads de processamento.
+- **Paralelismo Massivo**: Centenas de conexões simultâneas por download (512 por padrão, configurável).
+- **Segmentação Adaptativa**: O tamanho de chunk se ajusta ao arquivo (256 KB a 6 MB), com um modo opcional de chunk grande (32 MB) para máquinas com bastante cache/memória.
+- **Escrita Direta no Arquivo Final**: Cada worker grava sua faixa diretamente no arquivo pré-alocado via `seek`, eliminando a etapa de junção (merge) de partes em disco.
+- **Telemetria de Velocidade**: A velocidade exibida é lida da placa de rede via `psutil` — suave como o Gerenciador de Tarefas do Windows e sem sobrecarregar as threads de download. (Observação: reflete o tráfego total da máquina, não apenas este download.)
 
 ### Engine de Mídia Avançada
 - **HLS/M3U8 Pro**: Parser inteligente de Master Playlists com seleção automática de resolução (360p até 4K).
@@ -66,16 +66,16 @@ O projeto segue um padrão de separação de responsabilidades rigoroso:
 
 2. Inicie a aplicação:
    ```bash
-   python main.py
+   python src/main.py
    ```
 
 ### Geração de Binário (.exe)
 
-O projeto utiliza o PyInstaller com suporte a bundling de assets e metadados de sistema (AppUserModelID):
+O projeto utiliza o PyInstaller com suporte a bundling de assets e metadados de sistema (AppUserModelID). Rode a partir da raiz do repositório:
 
 ```bash
 # Para gerar o executável usando o spec oficial:
-pyinstaller main.spec
+pyinstaller build/main.spec
 ```
 
 ---

@@ -1,11 +1,9 @@
 {
-    "version": "2.2",
-    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v2.2/Downloader.exe",
+    "version": "2.3",
+    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v2.3/Downloader.exe",
     "changelog": [
-        "Correção crítica de segurança em links com tokens criptográficos para evitar erros 403.",
-        "Downloads paralelos ultra rápidos ativados por padrão para links do YouTube e Blogger.",
-        "Correção do cálculo do tempo restante para downloads de transmissão de vídeo (M3U8).",
-        "Resolução de falha silenciosa de abertura de extensões no Windows.",
-        "Fim completo da criação de pastas indesejadas '__pycache__' e limpeza geral do projeto."
+        "Downloads de links do YouTube e Blogger não travam mais no final: quando o servidor limita as conexões, o programa reduz o paralelismo automaticamente e conclui o download.",
+        "Correção de falha que abandonava partes do arquivo e o deixava incompleto quando o servidor recusava muitas conexões de uma vez.",
+        "Links expirados passam a ser detectados e o download é encerrado de forma limpa, em vez de tentar para sempre."
     ]
 }
