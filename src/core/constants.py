@@ -3,6 +3,8 @@ core/constants.py
 Constantes globais do Downloader v2. Sem dependências externas.
 """
 
+import os
+
 # --- Tamanhos de chunk de leitura HTTP ---
 CHUNK_SIZE       = 2 * 1024 * 1024   # 2 MB  — padrão geral
 SMALL_CHUNK_SIZE = 256 * 1024         # 256 KB — arquivos < 1 MB
@@ -23,9 +25,18 @@ MIN_SWARM_THREADS    = 4     # piso de conexões ao reduzir o paralelismo
 THROTTLE_COOLDOWN    = 4.0   # s de pausa após uma rajada de recusas
 SWARM_STALL_TIMEOUT  = 60.0  # s sem NENHUM byte novo => aborta (link expirado)
 
-# --- Paths temporários ---
-TEMP_DIR     = ".download_parts"
-HISTORY_FILE = ".download_history.json"
+# --- Paths de dados ---
+# Absolutos: relativos ao diretório de trabalho quebravam quando o app era
+# aberto de uma pasta sem permissão de escrita e espalhavam o histórico.
+APP_DATA_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "DownloaderV2"
+)
+TEMP_DIR     = os.path.join(APP_DATA_DIR, "parts")
+HISTORY_FILE = os.path.join(APP_DATA_DIR, "download_history.json")
+LEGACY_HISTORY_FILE = ".download_history.json"
+
+# Sufixo do arquivo em andamento; só vira o nome final após a verificação.
+PARTIAL_SUFFIX = ".part"
 
 # --- Timer da UI ---
 UPDATE_INTERVAL = 100  # ms entre cada tick de atualização da interface

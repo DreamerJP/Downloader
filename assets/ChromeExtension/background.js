@@ -6,6 +6,12 @@
 
 importScripts('version.js');
 
+// As capturas levam os cookies/Authorization da aba: ficam só na memória do
+// navegador (storage.session, some ao fechar o Chrome), nunca no disco.
+const mediaStore = chrome.storage.session;
+// Versões antigas gravavam as capturas em storage.local (disco): apaga.
+chrome.storage.local.remove('capturedMedia');
+
 const reqHeadersCache = new Map();
 const recentUrls      = new Map();   // tab+url -> ts (anti-flood entre listeners)
 const MAX_ITEMS_PER_TAB = 80;
@@ -212,7 +218,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'clear') {
-    chrome.storage.local.set({ capturedMedia: [] });
+    mediaStore.set({ capturedMedia: [] });
     chrome.tabs.query({}, tabs => {
       tabs.forEach(t => { try { chrome.action.setBadgeText({ text: '', tabId: t.id }); } catch (_) {} });
     });
@@ -222,9 +228,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'clearTab') {
     const tabId = request.tabId;
-    chrome.storage.local.get({ capturedMedia: [] }, result => {
+    mediaStore.get({ capturedMedia: [] }, result => {
       const filtered = result.capturedMedia.filter(m => m.tabId !== tabId);
-      chrome.storage.local.set({ capturedMedia: filtered }, () => {
+      mediaStore.set({ capturedMedia: filtered }, () => {
         try { chrome.action.setBadgeText({ text: '', tabId }); } catch (_) {}
         sendResponse({ status: 'ok' });
       });
@@ -236,9 +242,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // ── Limpa ao navegar ────────────────────────────────────────────
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading' && changeInfo.url) {
-    chrome.storage.local.get({ capturedMedia: [] }, result => {
+    mediaStore.get({ capturedMedia: [] }, result => {
       const filtered = result.capturedMedia.filter(m => m.tabId !== tabId);
-      chrome.storage.local.set({ capturedMedia: filtered });
+      mediaStore.set({ capturedMedia: filtered });
       try { chrome.action.setBadgeText({ text: '', tabId }); } catch (_) {}
     });
   }
@@ -258,7 +264,7 @@ function saveMedia(url, type, headers, tabId, initiator, contentLength, domLabel
   const cleanHeaders = headers && typeof headers === 'object' ? headers : {};
 
   function processMedia(tabTitle, pageUrl) {
-    chrome.storage.local.get({ capturedMedia: [] }, function (result) {
+    mediaStore.get({ capturedMedia: [] }, function (result) {
       let media = Array.isArray(result.capturedMedia)
         ? result.capturedMedia.filter(m => m && typeof m.url === 'string')
         : [];
@@ -271,7 +277,7 @@ function saveMedia(url, type, headers, tabId, initiator, contentLength, domLabel
         media[idx].timestamp = Date.now();
         media[idx].tabTitle = tabTitle || media[idx].tabTitle || 'Desconhecido';
         media[idx].pageUrl = pageUrl || media[idx].pageUrl || '';
-        chrome.storage.local.set({ capturedMedia: trimMedia(media) });
+        mediaStore.set({ capturedMedia: trimMedia(media) });
         return;
       }
 
@@ -291,7 +297,7 @@ function saveMedia(url, type, headers, tabId, initiator, contentLength, domLabel
       else media.push(entry);
 
       media = trimMedia(media);
-      chrome.storage.local.set({ capturedMedia: media });
+      mediaStore.set({ capturedMedia: media });
 
       if (tabId >= 0) {
         const tabEntries   = media.filter(m => m.tabId === tabId);

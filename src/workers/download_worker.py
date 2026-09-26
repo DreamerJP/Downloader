@@ -76,8 +76,13 @@ class DownloadWorker(QThread):
         self._stopped_by_user = False
         self._abandoned = False
         self._final_path: Optional[str] = None
-        self._part_dir: Optional[str] = None
+        # Só o que o engine declarou ter criado pode ser apagado no cancelamento:
+        # o output_path digitado pode ser um arquivo do usuário.
+        self._work_paths: list[str] = []
+        self._part_dirs: list[str] = []
         self._child_meipass: Optional[str] = None
+        self._drained = threading.Event()
+        self._cleanup_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
     # Controle externo
@@ -104,7 +109,7 @@ class DownloadWorker(QThread):
                 pass
 
         self.finished_signal.emit(False, "Download cancelado.")
-        threading.Thread(target=self._cleanup_after_kill, daemon=True).start()
+        self._start_cleanup()
 
     def pause(self) -> None:
         """
@@ -125,7 +130,7 @@ class DownloadWorker(QThread):
                 proc.terminate()
             except Exception:
                 pass
-        threading.Thread(target=self._cleanup_after_kill, daemon=True).start()
+        self._start_cleanup()
 
     def resume(self) -> None:
         # Sem efeito direto — a UI (`main_window`) cria um worker novo com
@@ -135,6 +140,26 @@ class DownloadWorker(QThread):
     @property
     def is_paused(self) -> bool:
         return self._is_paused
+
+    @property
+    def stopped_by_user(self) -> bool:
+        return self._stopped_by_user
+
+    @property
+    def final_path(self) -> Optional[str]:
+        """Caminho final informado pelo engine (None se ainda não decidido)."""
+        return self._final_path
+
+    def wait_cleanup(self, timeout: float) -> None:
+        """Espera a limpeza pós-cancelamento terminar (ex.: antes de fechar o app)."""
+        t = self._cleanup_thread
+        if t is not None:
+            t.join(timeout)
+
+    def remove_partial_files(self) -> None:
+        """Apaga os parciais deste download (usado ao descartar um download pausado)."""
+        self._drained.wait(5)
+        self._remove_partial_files()
 
     def abandon(self) -> None:
         """
@@ -152,6 +177,7 @@ class DownloadWorker(QThread):
         try:
             self._run_impl()
         except Exception as e:
+            self._drained.set()
             # Qualquer exceção não tratada aqui mata a QThread silenciosamente
             # e a UI fica esperando um sinal que nunca virá. Capturamos tudo
             # e emitimos finished para que a UI volte ao estado inicial.
@@ -194,6 +220,14 @@ class DownloadWorker(QThread):
         )
         self._process.start()
 
+        # Parar/Pausar clicado antes de o processo existir: stop()/pause() não
+        # tinham o que encerrar, então o processo recém-criado morre aqui.
+        if self._stopped_by_user or self._is_paused:
+            try:
+                self._process.terminate()
+            except Exception:
+                pass
+
         # Pontas do filho são fechadas no pai — o filho mantém suas próprias.
         msg_send.close()
         cmd_recv.close()
@@ -223,8 +257,12 @@ class DownloadWorker(QThread):
                 self.segment_done_signal.emit()
             elif kind == "resolved_path":
                 self._final_path = args[0]
+            elif kind == "work_path":
+                if args[0] not in self._work_paths:
+                    self._work_paths.append(args[0])
             elif kind == "part_dir":
-                self._part_dir = args[0]
+                if args[0] not in self._part_dirs:
+                    self._part_dirs.append(args[0])
             elif kind == "meipass":
                 self._child_meipass = args[0]
             elif kind == "finished":
@@ -237,11 +275,12 @@ class DownloadWorker(QThread):
             self._process.join(timeout=2)
         except Exception:
             pass
+        self._drained.set()
 
         if not finished_emitted and not self._stopped_by_user and not self._is_paused:
-            success = (self._process.exitcode == 0) if self._process else False
-            msg = "Download concluído!" if success else "Falha no download."
-            self.finished_signal.emit(success, msg)
+            # Sem a mensagem "finished" o engine morreu antes de verificar e
+            # renomear o arquivo: nunca é sucesso, mesmo com exitcode 0.
+            self.finished_signal.emit(False, "Falha no download.")
 
         try:
             msg_recv.close()
@@ -265,12 +304,19 @@ class DownloadWorker(QThread):
         except (BrokenPipeError, OSError):
             pass
 
+    def _start_cleanup(self) -> None:
+        self._cleanup_thread = threading.Thread(target=self._cleanup_after_kill, daemon=True)
+        self._cleanup_thread.start()
+
     def _cleanup_after_kill(self) -> None:
         """
         Após terminate(), aguarda o processo realmente sair e remove
         arquivos parciais deixados em disco. Roda em thread daemon, fora
         do caminho da UI.
         """
+        # Espera o loop de run() ler o que ficou no Pipe: um "work_path" ainda
+        # não lido deixaria o parcial para trás.
+        self._drained.wait(10)
         proc = self._process
         if proc is not None:
             try:
@@ -298,21 +344,19 @@ class DownloadWorker(QThread):
 
     def _remove_partial_files(self) -> None:
         """
-        Remove o arquivo de saída parcial e o `part_dir` (state.json do
-        swarm / segmentos do HLS) reportado pelo engine via Pipe.
+        Remove os arquivos em andamento e os `part_dir` (state.json do
+        swarm / segmentos do HLS) reportados pelo engine via Pipe.
         """
-        target = self._final_path or self.output_path
-        if target and os.path.isfile(target):
-            try:
-                os.remove(target)
-            except OSError:
-                pass
+        for target in self._work_paths:
+            if os.path.isfile(target):
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass
 
-        if self._part_dir and os.path.isdir(self._part_dir):
-            try:
-                shutil.rmtree(self._part_dir, ignore_errors=True)
-            except Exception:
-                pass
+        for part_dir in self._part_dirs:
+            if os.path.isdir(part_dir):
+                shutil.rmtree(part_dir, ignore_errors=True)
 
         try:
             if os.path.isdir(TEMP_DIR) and not os.listdir(TEMP_DIR):

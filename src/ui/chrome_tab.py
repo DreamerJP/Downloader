@@ -6,7 +6,7 @@ Permite instalar os arquivos necessários para o interceptor de downloads.
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton,
-    QGroupBox, QHBoxLayout, QGridLayout, QLineEdit
+    QGroupBox, QHBoxLayout, QGridLayout, QLineEdit, QMessageBox
 )
 from PyQt6.QtCore import pyqtSignal
 from chrome_ext.installer import ChromeExtensionInstaller
@@ -121,10 +121,22 @@ class ChromeTab(QWidget):
         label.style().polish(label)
 
     def _on_install(self):
-        if self.installer.install():
+        if not self.installer.install():
+            QMessageBox.critical(
+                self,
+                "Falha ao instalar",
+                f"Não foi possível copiar os arquivos da extensão.\n\n{self.installer.last_error}",
+            )
             self.refresh_status()
-            self.status_changed.emit()
-            # Copiar path para o clipboard para facilitar o usuário
-            from PyQt6.QtGui import QGuiApplication
-            clipboard = QGuiApplication.clipboard()
-            clipboard.setText(self.installer.ext_dest_path)
+            return
+        self.refresh_status()
+        self.status_changed.emit()
+        # Copiar path para o clipboard para facilitar o usuário
+        from PyQt6.QtGui import QGuiApplication
+        QGuiApplication.clipboard().setText(self.installer.ext_dest_path)
+        QMessageBox.information(
+            self,
+            "Extensão instalada",
+            "Arquivos instalados. O caminho da pasta foi copiado: cole-o no Chrome "
+            "ao escolher Carregar sem compactação.",
+        )

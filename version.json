@@ -1,9 +1,14 @@
 {
-    "version": "2.3",
-    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v2.3/Downloader.exe",
+    "version": "2.4",
+    "download_url": "https://github.com/DreamerJP/Downloader/releases/download/v2.4/Downloader.exe",
     "changelog": [
-        "Downloads de links do YouTube e Blogger não travam mais no final: quando o servidor limita as conexões, o programa reduz o paralelismo automaticamente e conclui o download.",
-        "Correção de falha que abandonava partes do arquivo e o deixava incompleto quando o servidor recusava muitas conexões de uma vez.",
-        "Links expirados passam a ser detectados e o download é encerrado de forma limpa, em vez de tentar para sempre."
+        "Parar ou pausar no começo de um download não apaga nem sobrescreve mais arquivos que já existiam.",
+        "O arquivo em andamento fica com \".part\" no nome e só recebe o nome final depois de conferido.",
+        "Vídeos .m3u8: áudio separado, trecho inicial, troca de chave e trechos de arquivo único agora funcionam; vídeos com proteção que o programa não abre são avisados.",
+        "Links .mpd e respostas vazias do servidor não aparecem mais como \"concluído\".",
+        "Velocidade e tempo restante mostram só o download; o histórico registra falhas e cancelamentos e abre o arquivo com clique duplo.",
+        "A barra de progresso por partes termina completa e é limpa ao iniciar outro download.",
+        "Senha e proxy salvos ficam protegidos, e fechar ou atualizar com download ativo pede confirmação.",
+        "Atualização automática mais segura: se algo der errado, a versão anterior volta e o programa reabre."
     ]
 }

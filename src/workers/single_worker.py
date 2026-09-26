@@ -46,6 +46,7 @@ def single_stream_download(
     log_fn: Optional[Callable[[str, str], None]] = None,
     total_size_fn: Optional[Callable[[int], None]] = None,
     response_tracker=None,
+    connect_timeout: float = CONNECT_TIMEOUT,
 ) -> bool:
     """
     Baixa um arquivo em stream único com suporte a resume e retry automático.
@@ -74,7 +75,7 @@ def single_stream_download(
                 headers=headers,
                 stream=True,
                 allow_redirects=True,
-                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                timeout=(connect_timeout, READ_TIMEOUT),
             ) as r:
                 if response_tracker is not None:
                     response_tracker.add(r)
@@ -103,6 +104,13 @@ def single_stream_download(
                                 ) from exc
                             continue
                     r.raise_for_status()
+                    if r.status_code not in (200, 206):
+                        # 204/304 e afins passam pelo raise_for_status, mas não
+                        # trazem o arquivo: gravar o corpo vazio seria um falso sucesso.
+                        raise requests.HTTPError(
+                            f"servidor respondeu HTTP {r.status_code} sem o arquivo",
+                            response=r,
+                        )
 
                     # Informar tamanho total
                     expected_response_len = None

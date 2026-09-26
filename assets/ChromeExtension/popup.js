@@ -43,7 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateList() {
     chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
       currentTabId = tabs[0] ? tabs[0].id : -1;
-      chrome.storage.local.get({ capturedMedia: [] }, result => {
+      chrome.storage.session.get({ capturedMedia: [] }, result => {
         allMedia = normalizeMediaItems(result.capturedMedia)
           .filter(m => m.tabId === currentTabId);
         renderList();
@@ -178,6 +178,7 @@ document.addEventListener('DOMContentLoaded', () => {
       sel.addEventListener('change', () => {
         const selected = group.variants[sel.value];
         updateCardUrl(card, selected);
+        syncCopyButton(selected);
       });
     }
 
@@ -211,6 +212,18 @@ document.addEventListener('DOMContentLoaded', () => {
     // ── Eventos dos botões ──
     const copyBtn = actions.querySelector('.btn-copy');
     const copyLabel = copyBtn.querySelector('span');
+    const copyTitle = copyBtn.title;
+
+    // O app não baixa DASH: o .mpd é só a lista das partes do vídeo.
+    function syncCopyButton(variant) {
+      const unsupported = variant.format === 'DASH';
+      copyBtn.disabled = unsupported;
+      copyBtn.title = unsupported
+        ? 'O Downloader não baixa DASH (.mpd). Procure um link HLS ou MP4 nesta aba.'
+        : copyTitle;
+    }
+    syncCopyButton(primary);
+
     copyBtn.addEventListener('click', () => {
       const url = getCurrentUrl(card, group);
       const sel = card.querySelector('.variant-select');
@@ -255,6 +268,14 @@ document.addEventListener('DOMContentLoaded', () => {
     'proxy-connection',
     'proxy-authorization',
     'range',
+    // Condicionais do cache do navegador: o servidor responderia 304 sem o arquivo.
+    'if-none-match',
+    'if-modified-since',
+    'if-match',
+    'if-unmodified-since',
+    'if-range',
+    // O app pede o arquivo sem compressão; gzip/br/zstd quebram os trechos.
+    'accept-encoding',
     ':authority',
     ':method',
     ':path',
@@ -436,6 +457,6 @@ document.addEventListener('DOMContentLoaded', () => {
   updateList();
 
   chrome.storage.onChanged.addListener((changes, ns) => {
-    if (ns === 'local' && changes.capturedMedia) updateList();
+    if (ns === 'session' && changes.capturedMedia) updateList();
   });
 });

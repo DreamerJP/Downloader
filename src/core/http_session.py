@@ -28,6 +28,22 @@ DEFAULT_STREAMING_UA = (
 )
 
 
+# Headers copiados do navegador que não podem ir para o download:
+# - condicionais fazem o servidor responder 304 (sem corpo) quando o navegador
+#   já tinha o arquivo em cache;
+# - Accept-Encoding do navegador (gzip/br/zstd) quebra ranges byte a byte e o
+#   requests não decodifica br/zstd sem bibliotecas extras.
+_IGNORED_CUSTOM_HEADERS = frozenset({
+    "if-none-match",
+    "if-modified-since",
+    "if-match",
+    "if-unmodified-since",
+    "if-range",
+    "accept-encoding",
+    "range",
+})
+
+
 def _host_avoids_byte_range_probe(hostname: Optional[str]) -> bool:
     h = (hostname or "").lower()
     return "googlevideo.com" in h or h.endswith(".googleusercontent.com")
@@ -121,8 +137,11 @@ def create_session(
     }
     if custom_headers:
         for key, val in custom_headers.items():
-            if val:  # Ignorar headers com valor vazio
-                headers[key] = val
+            if not val:  # Ignorar headers com valor vazio
+                continue
+            if str(key).lower() in _IGNORED_CUSTOM_HEADERS:
+                continue
+            headers[key] = val
     session.headers.update(headers)
 
     if proxy:
@@ -171,7 +190,7 @@ def get_server_info(
     session: requests.Session,
     url: str,
     timeout: float = CONNECT_TIMEOUT,
-) -> tuple[Optional[str], Optional[int], Optional[str]]:
+) -> tuple[Optional[str], Optional[int], Optional[str], str]:
     """
     Detecta capacidades do servidor: suporte a range requests e tamanho do arquivo.
 
@@ -186,12 +205,14 @@ def get_server_info(
         timeout : timeout de conexão em segundos
 
     Retorna:
-        (accept_ranges, content_length, content_encoding)
-        Qualquer campo pode ser None se o servidor não informar.
+        (accept_ranges, content_length, content_encoding, content_type)
+        Os três primeiros podem ser None se o servidor não informar;
+        content_type vem em minúsculas ("" se ausente).
     """
     accept_ranges: Optional[str] = None
     content_length: Optional[int] = None
     content_encoding: Optional[str] = None
+    content_type = ""
 
     # --- Passo 1: HEAD ---
     try:
@@ -199,6 +220,7 @@ def get_server_info(
         r.raise_for_status()
         accept_ranges = r.headers.get("Accept-Ranges")
         content_encoding = r.headers.get("Content-Encoding")
+        content_type = (r.headers.get("Content-Type") or "").lower()
         raw_len = r.headers.get("Content-Length")
         if raw_len is not None:
             try:
@@ -245,6 +267,8 @@ def get_server_info(
 
             if content_encoding is None:
                 content_encoding = r2.headers.get("Content-Encoding")
+            if not content_type:
+                content_type = (r2.headers.get("Content-Type") or "").lower()
 
             r2.close()
         except Exception:
@@ -252,4 +276,4 @@ def get_server_info(
             if _host_avoids_byte_range_probe(hostname):
                 accept_ranges = "bytes"
 
-    return accept_ranges, content_length, content_encoding
+    return accept_ranges, content_length, content_encoding, content_type

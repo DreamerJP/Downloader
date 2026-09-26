@@ -261,6 +261,10 @@ class Updater:
 
         Usa 'taskkill /PID' em vez de '/IM' para evitar encerrar outras
         instâncias do aplicativo que estejam abertas ao mesmo tempo.
+
+        O .exe antigo é renomeado para .old (não apagado) até o novo estar no
+        lugar; se o novo não puder ser movido (antivírus, disco), o antigo
+        volta. Em qualquer saída o app é reaberto.
         """
         old_exe = os.path.normpath(os.path.abspath(old_exe))
         new_exe = os.path.normpath(os.path.abspath(new_exe))
@@ -270,24 +274,41 @@ class Updater:
             "setlocal enabledelayedexpansion\n\n"
             f'set "OLD_EXE={old_exe}"\n'
             f'set "NEW_EXE={new_exe}"\n'
-            f'set "APP_PID={pid}"\n\n'
+            f'set "APP_PID={pid}"\n'
+            'set "BACKUP=%OLD_EXE%.old"\n'
+            'for %%I in ("%OLD_EXE%") do set "EXE_DIR=%%~dpI"\n'
+            # 'timeout' sai na hora quando o BAT roda sem console (stdin
+            # redirecionado); ping local é a espera que funciona nesse caso.
+            'set "WAIT1=%SystemRoot%\\System32\\PING.EXE -n 2 127.0.0.1"\n\n'
             "taskkill /PID %APP_PID% /F >nul 2>&1\n"
-            "timeout /t 1 /nobreak >nul\n\n"
+            "%WAIT1% >nul\n\n"
             'if not exist "%OLD_EXE%" exit /b 1\n'
-            'if not exist "%NEW_EXE%" exit /b 1\n\n'
+            'if not exist "%NEW_EXE%" goto relaunch\n\n'
+            'del /F /Q "%BACKUP%" >nul 2>&1\n'
             'set "MAX=20"\n'
             ":loop\n"
-            'del /F /Q "%OLD_EXE%" >nul 2>&1\n'
+            'move /Y "%OLD_EXE%" "%BACKUP%" >nul 2>&1\n'
             'if exist "%OLD_EXE%" (\n'
-            "    timeout /t 1 /nobreak >nul\n"
+            "    %WAIT1% >nul\n"
             "    set /a MAX-=1\n"
             "    if !MAX! GTR 0 goto loop\n"
-            "    exit /b 1\n"
+            '    del /F /Q "%NEW_EXE%" >nul 2>&1\n'
+            "    goto relaunch\n"
             ")\n"
-            'move /Y "%NEW_EXE%" "%OLD_EXE%" >nul || exit /b 1\n'
-            'for %%I in ("%OLD_EXE%") do set "EXE_DIR=%%~dpI"\n'
+            'move /Y "%NEW_EXE%" "%OLD_EXE%" >nul 2>&1\n'
+            'if not exist "%OLD_EXE%" (\n'
+            '    move /Y "%BACKUP%" "%OLD_EXE%" >nul 2>&1\n'
+            '    del /F /Q "%NEW_EXE%" >nul 2>&1\n'
+            "    goto relaunch\n"
+            ")\n"
             'start "" /D "%EXE_DIR%" "%OLD_EXE%"\n'
-            "exit /b 0\n"
+            "%WAIT1% >nul\n"
+            "%WAIT1% >nul\n"
+            'del /F /Q "%BACKUP%" >nul 2>&1\n'
+            "exit /b 0\n\n"
+            ":relaunch\n"
+            'start "" /D "%EXE_DIR%" "%OLD_EXE%"\n'
+            "exit /b 1\n"
         )
 
     def _write_bat(self, content: str) -> str:

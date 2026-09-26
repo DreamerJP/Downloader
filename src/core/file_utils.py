@@ -14,7 +14,7 @@ import threading
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
-from core.constants import TEMP_DIR
+from core.constants import PARTIAL_SUFFIX, TEMP_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -97,21 +97,44 @@ def resolve_output_path(output_input: str, url: str) -> str:
     return ensure_file_extension(full, url)
 
 
+def _path_taken(path: str) -> bool:
+    # O parcial de outro download conta como ocupado: dois downloads com o
+    # mesmo nome final disputariam o mesmo arquivo em andamento.
+    return os.path.exists(path) or os.path.exists(path + PARTIAL_SUFFIX)
+
+
 def make_unique_path(path: str) -> str:
     """
-    Se `path` já existe, retorna uma variante com sufixo numerado
-    (ex.: `arquivo.ext` → `arquivo (1).ext`, `arquivo (2).ext`, ...).
+    Se `path` (ou seu parcial) já existe, retorna uma variante com sufixo
+    numerado (ex.: `arquivo.ext` → `arquivo (1).ext`, `arquivo (2).ext`, ...).
     Caso contrário retorna `path` inalterado.
     """
-    if not os.path.exists(path):
+    if not _path_taken(path):
         return path
     base, ext = os.path.splitext(path)
     n = 1
     while True:
         candidate = f"{base} ({n}){ext}"
-        if not os.path.exists(candidate):
+        if not _path_taken(candidate):
             return candidate
         n += 1
+
+
+def finalize_partial(partial_path: str, final_path: str) -> str:
+    """
+    Dá ao arquivo em andamento o nome final. Se algo com esse nome surgiu
+    durante o download, usa um nome numerado em vez de sobrescrever.
+    Retorna o caminho efetivamente usado.
+    """
+    target = final_path
+    while True:
+        try:
+            # rename (e não replace): no Windows falha se o destino existe,
+            # em vez de sobrescrever um arquivo que não é deste download.
+            os.rename(partial_path, target)
+            return target
+        except FileExistsError:
+            target = make_unique_path(target)
 
 
 # ---------------------------------------------------------------------------

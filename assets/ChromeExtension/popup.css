@@ -445,6 +445,8 @@ main::-webkit-scrollbar-track { background: transparent; }
 .btn-act:hover { background: var(--surface2); color: var(--text); }
 
 .btn-act.copied { color: var(--accent); background: var(--accent-bg); }
+.btn-act:disabled,
+.btn-act:disabled:hover { color: var(--text2); background: none; opacity: 0.4; cursor: not-allowed; }
 .btn-act.btn-open:hover { color: var(--blue); background: var(--blue-bg); }
 
 .btn-act + .btn-act { border-left: 1px solid var(--border); }

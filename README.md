@@ -18,8 +18,8 @@ O **Downloader** é uma reengenharia completa focada em performance bruta e esta
 ### Performance de Próxima Geração
 - **Paralelismo Massivo**: Centenas de conexões simultâneas por download (512 por padrão, configurável).
 - **Segmentação Adaptativa**: O tamanho de chunk se ajusta ao arquivo (256 KB a 6 MB), com um modo opcional de chunk grande (32 MB) para máquinas com bastante cache/memória.
-- **Escrita Direta no Arquivo Final**: Cada worker grava sua faixa diretamente no arquivo pré-alocado via `seek`, eliminando a etapa de junção (merge) de partes em disco.
-- **Telemetria de Velocidade**: A velocidade exibida é lida da placa de rede via `psutil` — suave como o Gerenciador de Tarefas do Windows e sem sobrecarregar as threads de download. (Observação: reflete o tráfego total da máquina, não apenas este download.)
+- **Escrita Direta no Arquivo Final**: Cada worker grava sua faixa diretamente no arquivo pré-alocado via `seek`, eliminando a etapa de junção (merge) de partes em disco. Enquanto o download não termina e não é verificado, o arquivo fica com o sufixo `.part`.
+- **Telemetria de Velocidade**: A velocidade e o tempo restante vêm dos bytes recebidos por este download (média móvel de 2 s), sem contar o resto do tráfego da máquina.
 
 ### Engine de Mídia Avançada
 - **HLS/M3U8 Pro**: Parser inteligente de Master Playlists com seleção automática de resolução (360p até 4K).
@@ -27,7 +27,7 @@ O **Downloader** é uma reengenharia completa focada em performance bruta e esta
 - **Recuperação de Falhas**: Sistema de re-tentativa automática para segmentos corrompidos ou links expirados.
 
 ### Integração com Navegador
-- **Chrome Extension Monitor**: Captura links de vídeo (M3U8, MP4, TS, MPD) automaticamente durante a navegação.
+- **Chrome Extension Monitor**: Captura links de vídeo (M3U8, MP4, TS, MPD) automaticamente durante a navegação. Links DASH (.mpd) são só listados: o app não baixa esse formato.
 - **Gerenciamento Nativo**: Instalação e atualização da extensão diretamente pela interface do app, com limpeza automática de metadados ao alternar abas.
 
 ---
@@ -51,7 +51,7 @@ O projeto segue um padrão de separação de responsabilidades rigoroso:
 | **Sistema Operacional** | Windows 10 ou 11 |
 | **Python** | 3.10+ |
 | **PyQt6** | 6.4.0+ |
-| **Bibliotecas Chave** | requests, m3u8, pycryptodome, psutil |
+| **Bibliotecas Chave** | requests, m3u8, pycryptodome |
 
 ---
 

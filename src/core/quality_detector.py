@@ -47,6 +47,11 @@ def is_hls_url(url: str) -> bool:
     return bool(re.search(r"(?:^|/)(?:master|playlist)(?:\.|/|$)", path))
 
 
+def is_dash_url(url: str) -> bool:
+    """Retorna True se a URL aponta para um manifesto DASH (.mpd)."""
+    return urlparse(url).path.lower().endswith(".mpd")
+
+
 # ---------------------------------------------------------------------------
 # Otimização de chunk e threads
 # ---------------------------------------------------------------------------

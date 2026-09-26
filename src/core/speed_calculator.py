@@ -1,15 +1,10 @@
 """
 core/speed_calculator.py
 
-Telemetria de velocidade via psutil.net_io_counters().
+Telemetria do download a partir do contador de bytes do próprio download.
 
-Abordagem: leitura da NIC global a cada tick do QTimer (thread principal).
-Mesmo método usado pelo Gerenciador de Tarefas do Windows — suave, preciso,
-zero overhead nas threads de download.
-
-As threads de download chamam counter.add(delta) para contabilizar bytes
-baixados (usado para progresso e ETA). A velocidade exibida no gráfico vem
-exclusivamente da NIC.
+As threads de download chamam counter.add(delta); o QTimer da UI lê o total
+a cada tick e deriva velocidade (janela deslizante + EWMA), progresso e ETA.
 """
 
 import math
@@ -17,18 +12,21 @@ import time
 from collections import deque
 from multiprocessing import Value
 
-import psutil
+
+# Janela da média de velocidade. O swarm só contabiliza a cada 1 MB gravado
+# por conexão; com ticks de 100 ms, uma janela curta faria o valor saltar.
+SPEED_WINDOW_SECONDS = 2.0
 
 
 class AtomicCounter:
     """
-    Contador cumulativo de bytes — usado para progresso e ETA.
+    Contador cumulativo de bytes — usado para velocidade, progresso e ETA.
 
     Compartilhado entre o processo da UI e o processo filho via
     multiprocessing.Value. As threads do filho chamam add() (com lock); o
     QTimer da UI lê via read() — leitura atômica sem lock, segura em int64
-    alinhado em arquiteturas 64-bit. Crucial para que o pai não bloqueie
-    quando o filho é suspenso (pause via psutil) com o lock segurado.
+    alinhado em arquiteturas 64-bit. Sem lock na leitura, o pai não trava se
+    o filho for morto (pause/cancelamento) segurando o lock.
     """
 
     def __init__(self) -> None:
@@ -48,10 +46,7 @@ class AtomicCounter:
 
 class SpeedCalculator:
     """
-    Calcula métricas de velocidade de download.
-
-    Velocidade atual  → psutil.net_io_counters() (suave, como o Task Manager)
-    Bytes baixados    → AtomicCounter (para progresso e ETA)
+    Calcula métricas de velocidade de download a partir do AtomicCounter.
     """
 
     def __init__(
@@ -77,9 +72,7 @@ class SpeedCalculator:
         self._last_chart_sample_ts: float | None = None
         self._ewma_speed: float = 0.0
         self._total_confirmed_bytes: int = 0
-
-        # Amostra inicial da NIC para calcular delta no primeiro tick
-        self._last_nic_bytes: int = self._read_nic()
+        self._speed_samples: deque[tuple[float, int]] = deque()
 
         self.peak_speed: float = 0.0
         self.total_bytes_target: int = 0
@@ -93,9 +86,11 @@ class SpeedCalculator:
         self.progress_mode = "bytes"
         self.total_bytes_target = max(int(total or 0), 0)
 
-    def set_total_segments(self, total: int) -> None:
+    def set_total_segments(self, total: int, already_done: int = 0) -> None:
+        """`already_done`: segmentos que já estavam em disco (retomada)."""
         self.progress_mode = "segments"
         self.total_segments = max(int(total or 0), 0)
+        self.completed_segments = max(int(already_done or 0), 0)
 
     def stop_tracking(self) -> None:
         if self._start_ts is None or self._end_ts is not None:
@@ -111,7 +106,7 @@ class SpeedCalculator:
 
         # Leitura cumulativa lock-free — calcular delta a partir do total
         # acumulado. Sem reset no contador, o pai não trava se o filho
-        # estiver suspenso (psutil) com o lock segurado.
+        # for morto (pause/cancelamento) com o lock segurado.
         current = self.counter.read()
         delta_bytes = max(0, current - self._last_read_bytes)
         self._last_read_bytes = current
@@ -124,14 +119,13 @@ class SpeedCalculator:
         if self._start_ts is None:
             return self._empty_snapshot()
 
-        # Velocidade via NIC — suave como o Task Manager
-        current_nic = self._read_nic()
-        nic_delta = max(0, current_nic - self._last_nic_bytes)
-        self._last_nic_bytes = current_nic
-
-        if self._last_tick_ts is not None and now > self._last_tick_ts:
-            dt = now - self._last_tick_ts
-            instant_speed = nic_delta / dt
+        samples = self._speed_samples
+        samples.append((now, self._total_confirmed_bytes))
+        while len(samples) > 2 and now - samples[1][0] >= SPEED_WINDOW_SECONDS:
+            samples.popleft()
+        oldest_ts, oldest_bytes = samples[0]
+        if now > oldest_ts:
+            instant_speed = (self._total_confirmed_bytes - oldest_bytes) / (now - oldest_ts)
         else:
             instant_speed = 0.0
 
@@ -215,13 +209,6 @@ class SpeedCalculator:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _read_nic() -> int:
-        try:
-            return psutil.net_io_counters().bytes_recv
-        except Exception:
-            return 0
 
     def _get_eta_seconds(self, speed: float) -> float | None:
         if self.progress_mode == "segments":

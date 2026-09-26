@@ -94,6 +94,7 @@ def swarm_segment_worker(
     speed_counter: AtomicCounter,
     log_fn: Optional[Callable[[str, str], None]] = None,
     response_tracker=None,
+    connect_timeout: float = CONNECT_TIMEOUT,
 ) -> bool:
     """
     Baixa um segmento e escreve diretamente no arquivo final.
@@ -127,7 +128,7 @@ def swarm_segment_worker(
                 url,
                 headers=headers,
                 stream=True,
-                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                timeout=(connect_timeout, READ_TIMEOUT),
             ) as r:
                 if response_tracker is not None:
                     response_tracker.add(r)

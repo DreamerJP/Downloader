@@ -21,6 +21,7 @@ class ChromeExtensionInstaller:
     def __init__(self):
         self.app_data_path = self._get_app_data_path()
         self.ext_dest_path = os.path.join(self.app_data_path, "chrome_extension")
+        self.last_error: str = ""
 
     def _get_app_data_path(self) -> str:
         """Retorna o caminho da pasta de dados do app no usuário."""
@@ -63,17 +64,19 @@ class ChromeExtensionInstaller:
 
     def install(self) -> bool:
         """Copia os arquivos da extensão para a pasta AppData."""
+        self.last_error = ""
         source = self.get_source_ext_path()
         if not os.path.exists(source):
+            self.last_error = f"Arquivos da extensão não encontrados em: {source}"
             return False
-            
+
         try:
             if os.path.exists(self.ext_dest_path):
                 shutil.rmtree(self.ext_dest_path)
             shutil.copytree(source, self.ext_dest_path)
             return True
         except Exception as e:
-            print(f"[ChromeExt] Erro na instalação: {e}")
+            self.last_error = str(e)
             return False
 
     def uninstall(self) -> bool:

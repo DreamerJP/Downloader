@@ -19,6 +19,7 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import Any
+from urllib.parse import urlparse
 
 
 # ---------------------------------------------------------------------------
@@ -96,9 +97,11 @@ class _MessageEmitter:
     def segment_done(self) -> None:
         self.send("segment_done")
 
-    def segments_map(self, total: int, map_data: Any) -> None:
+    def segments_map(self, total: int, map_data: Any, force: bool = False) -> None:
+        # `force`: o último desenho não pode cair no limite de 0,2 s, senão a
+        # barra fica com pedaços "em andamento" depois do fim.
         now = time.time()
-        if now - self._last_map_emit < 0.2:
+        if not force and now - self._last_map_emit < 0.2:
             return
         self._last_map_emit = now
         self.send("segments_map", total, map_data)
@@ -155,6 +158,7 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
         msg_send : Pipe end para enviar mensagens ao parent
         cmd_recv : Pipe end para receber comandos do parent
     """
+    from core.constants import CONNECT_TIMEOUT, PARTIAL_SUFFIX
     from core.file_utils import make_unique_path, resolve_output_path
     from core.http_session import (
         apply_streaming_compat_headers,
@@ -165,6 +169,7 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
         find_best_quality_url,
         get_optimal_chunk_size,
         get_optimal_thread_count,
+        is_dash_url,
         is_hls_url,
         is_video_url,
     )
@@ -190,16 +195,23 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
     final_path = ""
     expected_total_size = None
     session = None
+    # (arquivo em andamento, nome final, rótulo) de cada arquivo produzido.
+    outputs: list = []
 
     try:
+        url = config["url"]
+        if is_dash_url(url):
+            _log_dash_unsupported(emitter)
+            return
+
         emitter.log("Preparando sessão HTTP...", "info")
         session = create_session(
             proxy=config.get("proxy"),
             auth=config.get("auth"),
             custom_headers=config.get("custom_headers"),
         )
+        connect_timeout = config.get("connect_timeout") or CONNECT_TIMEOUT
 
-        url = config["url"]
         apply_streaming_compat_headers(session, url)
         if (
             config.get("auto_detect_quality", True)
@@ -232,20 +244,35 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
         emitter.send("resolved_path", final_path)
         emitter.log(f"Destino: {final_path}", "info")
 
-        if is_hls_url(url):
-            success, final_path = _run_hls(
-                url, final_path, session, config, counter_proxy,
-                stop_event, pause_event, emitter, response_tracker,
-            )
-        else:
-            connect_timeout = config.get("connect_timeout", 5)
-            x3d_opt = config.get("x3d_opt", False)
-
+        is_playlist = is_hls_url(url)
+        if not is_playlist:
             emitter.log("Consultando capacidades do servidor...", "info")
-            accept_ranges, total_size, _enc = get_server_info(
+            accept_ranges, total_size, _enc, content_type = get_server_info(
                 session, url, connect_timeout
             )
+            if "dash+xml" in content_type:
+                _log_dash_unsupported(emitter)
+                return
+            # Playlist servida em link sem ".m3u8"/"master"/"playlist": o tipo
+            # do servidor ou o começo do arquivo denunciam.
+            if "mpegurl" in content_type or _looks_like_hls_playlist(
+                session, url, total_size, content_type, connect_timeout
+            ):
+                emitter.log("O link é uma playlist .m3u8; baixando as partes do vídeo.", "info")
+                is_playlist = True
+
+        if is_playlist:
+            success, outputs = _run_hls(
+                url, final_path, session, config, counter_proxy,
+                stop_event, pause_event, emitter, response_tracker,
+                connect_timeout,
+            )
+        else:
+            x3d_opt = config.get("x3d_opt", False)
+            work_path = final_path + PARTIAL_SUFFIX
+            outputs = [(work_path, final_path, "")]
             expected_total_size = total_size
+            emitter.send("work_path", work_path)
             emitter.log(
                 f"Servidor: ranges={'sim' if accept_ranges == 'bytes' else 'não'}, "
                 f"tamanho={_fmt_size(total_size)}",
@@ -264,7 +291,7 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
                     emitter.total_size(total_size)
                 success = single_stream_download(
                     url=url,
-                    output_path=final_path,
+                    output_path=work_path,
                     session=session,
                     chunk_size=chunk_size,
                     stop_event=stop_event,
@@ -273,6 +300,7 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
                     log_fn=emitter.log,
                     total_size_fn=emitter.total_size,
                     response_tracker=response_tracker,
+                    connect_timeout=connect_timeout,
                 )
             else:
                 chunk_size = get_optimal_chunk_size(total_size, x3d_opt)
@@ -285,21 +313,24 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
                     "info",
                 )
                 success = _run_swarm(
-                    url, final_path, session, total_size, chunk_size,
+                    url, work_path, session, total_size, chunk_size,
                     num_threads, counter_proxy, stop_event, pause_event,
-                    emitter, response_tracker,
+                    emitter, response_tracker, connect_timeout,
                 )
 
         if success and expected_total_size is not None:
             success = _verify_final_size(
-                final_path, expected_total_size, emitter.log
+                outputs[0][0], expected_total_size, emitter.log
             )
 
         if success and config.get("expected_checksum"):
             success = _verify_checksum(
-                final_path, config["expected_checksum"],
+                outputs[0][0], config["expected_checksum"],
                 stop_event, emitter.log,
             )
+
+        if success:
+            _finalize_outputs(outputs, emitter)
 
     except Exception as e:
         emitter.log(f"Erro inesperado: {e}", "error")
@@ -330,6 +361,7 @@ def engine_main(config: dict, counter, msg_send, cmd_recv) -> None:
 def _run_swarm(
     url, output_path, session, total_size, chunk_size, num_threads,
     counter_proxy, stop_event, pause_event, emitter, response_tracker,
+    connect_timeout,
 ) -> bool:
     import hashlib
     from core.constants import (
@@ -417,7 +449,7 @@ def _run_swarm(
                 url, seg, file_lock, output_path, session,
                 chunk_size, stop_event, pause_event,
                 counter_proxy, emitter.log,
-                response_tracker,
+                response_tracker, connect_timeout,
             )
             inflight[future] = seg
             submitted += 1
@@ -557,6 +589,8 @@ def _run_swarm(
         manager.save_to_file(state_file)
         return False
 
+    emitter.segments_map(total_size, manager.get_map_data(), force=True)
+
     if stop_event.is_set():
         return False
 
@@ -584,30 +618,31 @@ def _run_swarm(
 
 def _run_hls(
     url, output_path, session, config, counter_proxy,
-    stop_event, pause_event, emitter, response_tracker,
-) -> tuple[bool, str]:
+    stop_event, pause_event, emitter, response_tracker, connect_timeout,
+) -> tuple[bool, list]:
     """
-    Executa download HLS: parseia playlist, baixa segmentos .ts em paralelo,
-    descriptografa AES-128 e concatena em arquivo final.
+    Executa download HLS: resolve a master playlist, baixa os segmentos em
+    paralelo (AES-128 descriptografado em tempo real) e concatena cada faixa.
+
+    Retorna (sucesso, [(arquivo em andamento, nome final, rótulo), ...]).
+    A primeira faixa é o vídeo; a segunda, se existir, é o áudio que a
+    playlist serve separado.
     """
+    import hashlib
     import shutil
-    from core.constants import CHUNK_SIZE, PART_RECOVERY_LIMIT, TEMP_DIR
+    from core.constants import PARTIAL_SUFFIX, TEMP_DIR
 
     try:
         import m3u8
     except ImportError:
         emitter.log("Módulo m3u8 não instalado. Execute: pip install m3u8", "error")
-        return False, output_path
+        return False, []
 
-    emitter.log("Carregando playlist M3U8...", "info")
-    try:
-        r = session.get(url, timeout=(5, 30))
-        r.raise_for_status()
-        playlist = m3u8.loads(r.text, uri=url)
-    except Exception as e:
-        emitter.log(f"Erro ao carregar playlist: {e}", "error")
-        return False, output_path
+    playlist = _load_playlist(m3u8, session, url, connect_timeout, emitter)
+    if playlist is None:
+        return False, []
 
+    audio_url = None
     if playlist.is_variant:
         emitter.log(
             f"Master Playlist com {len(playlist.playlists)} resoluções detectada.",
@@ -616,52 +651,184 @@ def _run_hls(
         valid = [p for p in playlist.playlists if p.stream_info and p.stream_info.bandwidth]
         if not valid:
             emitter.log("Nenhuma stream válida encontrada.", "error")
-            return False, output_path
+            return False, []
         best = max(valid, key=lambda p: p.stream_info.bandwidth)
         res = getattr(best.stream_info, "resolution", None)
         emitter.log(f"Resolução selecionada: {res or 'Máxima'}", "success")
-        return _run_hls(
-            best.absolute_uri, output_path, session, config, counter_proxy,
-            stop_event, pause_event, emitter, response_tracker,
+        audio_url = _separate_audio_uri(best)
+        playlist = _load_playlist(m3u8, session, best.absolute_uri, connect_timeout, emitter)
+        if playlist is None:
+            return False, []
+        if playlist.is_variant:
+            emitter.log("A resolução escolhida aponta para outra master playlist; formato não suportado.", "error")
+            return False, []
+
+    base = os.path.splitext(output_path)[0]
+    tracks = [("video", playlist, base)]
+    if audio_url:
+        audio_playlist = _load_playlist(m3u8, session, audio_url, connect_timeout, emitter)
+        if audio_playlist is None:
+            return False, []
+        emitter.log(
+            "O áudio deste vídeo vem em faixa separada: ele será salvo em um "
+            "segundo arquivo ao lado do vídeo (juntar os dois exige um programa "
+            "como o ffmpeg).",
+            "warning",
         )
+        tracks.append(("audio", audio_playlist, f"{base} (áudio)"))
+
+    plans = []
+    total_segments = 0
+    already_done = 0
+    for label, pl, name_base in tracks:
+        if not pl.segments:
+            emitter.log("Nenhum segmento encontrado na playlist.", "error")
+            return False, []
+        key = f"{output_path}|{label}".encode("utf-8")
+        part_dir = os.path.join(TEMP_DIR, f"hls_{hashlib.md5(key).hexdigest()[:12]}")
+        os.makedirs(part_dir, exist_ok=True)
+        emitter.send("part_dir", part_dir)
+        total_segments += len(pl.segments)
+        already_done += sum(
+            1 for i in range(len(pl.segments)) if _hls_segment_ready(part_dir, i)
+        )
+        plans.append((label, pl, name_base, part_dir))
+
+    # Segmentos já em disco (retomada) entram no progresso como feitos, para
+    # a barra não contá-los de novo.
+    emitter.total_size(
+        {"mode": "segments", "total": total_segments, "done": already_done}
+    )
+
+    prepared = []
+    for label, pl, name_base, part_dir in plans:
+        track = _download_hls_track(
+            label, pl, name_base, part_dir, session, config, counter_proxy,
+            stop_event, pause_event, emitter, response_tracker, connect_timeout,
+        )
+        if track is None:
+            return False, []
+        prepared.append(track)
+
+    outputs = []
+    for (label, pl, name_base, part_dir), (final_path, inits) in zip(plans, prepared):
+        partial = final_path + PARTIAL_SUFFIX
+        emitter.send("work_path", partial)
+        if not _concat_hls_track(pl.segments, part_dir, inits, partial, emitter):
+            return False, []
+        outputs.append((partial, final_path, label))
+
+    time.sleep(0.3)
+    for _label, _pl, _name_base, part_dir in plans:
+        shutil.rmtree(part_dir, ignore_errors=True)
+
+    return True, outputs
+
+
+def _load_playlist(m3u8, session, url, connect_timeout, emitter):
+    emitter.log("Carregando playlist M3U8...", "info")
+    try:
+        r = session.get(url, timeout=(connect_timeout, 30))
+        r.raise_for_status()
+        return m3u8.loads(r.text, uri=url)
+    except Exception as e:
+        emitter.log(f"Erro ao carregar playlist: {e}", "error")
+        return None
+
+
+def _separate_audio_uri(variant):
+    """URI da faixa de áudio separada da variante escolhida, ou None se o áudio vem junto."""
+    medias = [
+        m for m in (getattr(variant, "media", None) or [])
+        if (getattr(m, "type", "") or "").upper() == "AUDIO" and getattr(m, "uri", None)
+    ]
+    if not medias:
+        return None
+    chosen = next(
+        (m for m in medias if (getattr(m, "default", "") or "").upper() == "YES"),
+        medias[0],
+    )
+    return chosen.absolute_uri
+
+
+def _hls_segment_ready(part_dir, index) -> bool:
+    path = os.path.join(part_dir, f"segment_{index}.ts")
+    try:
+        return os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def _init_section_key(segment):
+    init = getattr(segment, "init_section", None)
+    if init is None or not getattr(init, "uri", None):
+        return None
+    return (init.absolute_uri, getattr(init, "byterange", None) or "")
+
+
+def _download_hls_track(
+    label, playlist, name_base, part_dir, session, config, counter_proxy,
+    stop_event, pause_event, emitter, response_tracker, connect_timeout,
+):
+    """
+    Baixa todos os segmentos (e seções de inicialização) de uma faixa.
+    Retorna (nome_final, {chave_init: caminho}) ou None em falha.
+    """
+    from core.constants import CHUNK_SIZE, PART_RECOVERY_LIMIT
 
     segments = playlist.segments
-    if not segments:
-        emitter.log("Nenhum segmento encontrado na playlist.", "error")
-        return False, output_path
-
-    import hashlib as _hl
-    out_hash = _hl.md5(output_path.encode("utf-8")).hexdigest()[:12]
-    part_dir = os.path.join(TEMP_DIR, f"hls_{out_hash}")
-    os.makedirs(part_dir, exist_ok=True)
-    emitter.send("part_dir", part_dir)
-
+    track_name = "áudio" if label == "audio" else "vídeo"
     emitter.log(
-        f"Stream HLS com {len(segments)} segmentos .ts. Preparando download...",
+        f"Faixa de {track_name} com {len(segments)} segmentos. Preparando download...",
         "info",
     )
 
-    key_bytes = None
-    key_info = None
-    if hasattr(playlist, "keys") and playlist.keys and playlist.keys[0]:
-        k = playlist.keys[0]
-        if getattr(k, "method", None) == "AES-128":
-            key_bytes, key_info = _fetch_aes_key(session, k, emitter)
-            if key_bytes is None:
-                return False, output_path
-
     base_sequence = int(getattr(playlist, "media_sequence", 0) or 0)
-    emitter.total_size({"mode": "segments", "total": len(segments)})
+    # Chave por segmento: a playlist pode trocar de chave no meio (EXT-X-KEY
+    # repetido) ou alternar trechos cifrados e abertos.
+    seg_crypto = _hls_segment_crypto(segments, base_sequence, session, emitter)
+    if seg_crypto is None:
+        return None
+    seg_ranges = _hls_segment_ranges(segments)
+    if seg_ranges is None:
+        emitter.log(f"Trecho de segmento inválido na playlist da faixa de {track_name}.", "error")
+        return None
+
+    # fMP4: sem a seção de inicialização (EXT-X-MAP) os segmentos não abrem.
+    inits: dict = {}
+    for seg in segments:
+        key = _init_section_key(seg)
+        if key is None or key in inits:
+            continue
+        init_path = os.path.join(part_dir, f"init_{len(inits)}.mp4")
+        if not _fetch_init_section(session, key, init_path, connect_timeout, stop_event):
+            emitter.log(f"Falha ao baixar a seção de inicialização da faixa de {track_name}.", "error")
+            return None
+        inits[key] = init_path
+
+    if inits:
+        ext = ".m4a" if label == "audio" else ".mp4"
+    elif label == "audio" and urlparse(segments[0].absolute_uri).path.lower().endswith(".aac"):
+        ext = ".aac"
+    else:
+        ext = ".ts"
+    final_path = name_base + ext
 
     chunk_size = min(CHUNK_SIZE, 512 * 1024)
     max_workers = min(config.get("threads", 8), 256)
 
-    parts = [(i, seg.absolute_uri) for i, seg in enumerate(segments)]
-    failed = _hls_download_parts(
-        parts, part_dir, session, chunk_size, max_workers,
-        key_bytes, key_info, base_sequence,
-        counter_proxy, stop_event, pause_event, emitter, response_tracker,
-    )
+    parts = [
+        (i, seg.absolute_uri, seg_ranges[i], seg_crypto[i])
+        for i, seg in enumerate(segments)
+    ]
+    pending = [p for p in parts if not _hls_segment_ready(part_dir, p[0])]
+    failed = set()
+    if pending:
+        failed = _hls_download_parts(
+            pending, part_dir, session, chunk_size, max_workers,
+            counter_proxy, stop_event, pause_event, emitter, response_tracker,
+            connect_timeout,
+        )
 
     if failed and not stop_event.is_set():
         for recovery_round in range(1, PART_RECOVERY_LIMIT + 1):
@@ -670,12 +837,12 @@ def _run_hls(
                 f"{len(failed)} segmentos pendentes...",
                 "warning",
             )
-            retry_parts = [(i, u) for i, u in parts if i in failed]
+            retry_parts = [p for p in parts if p[0] in failed]
             failed = _hls_download_parts(
                 retry_parts, part_dir, session, chunk_size,
                 max(1, min(len(retry_parts), 32)),
-                key_bytes, key_info, base_sequence,
                 counter_proxy, stop_event, pause_event, emitter, response_tracker,
+                connect_timeout,
             )
             if not failed:
                 emitter.log("Repescagem concluída com sucesso!", "success")
@@ -688,63 +855,153 @@ def _run_hls(
                 f"{len(failed)} segmentos falharam permanentemente.",
                 "error",
             )
-            return False, output_path
+            return None
 
     if stop_event.is_set():
         emitter.log("Download HLS cancelado.", "warning")
-        return False, output_path
+        return None
 
-    missing = [
-        i for i, _ in parts
-        if not os.path.exists(os.path.join(part_dir, f"segment_{i}.ts"))
-    ]
+    missing = [p[0] for p in parts if not _hls_segment_ready(part_dir, p[0])]
     if missing:
         preview = ", ".join(str(i) for i in missing[:10])
         if len(missing) > 10:
             preview += ", ..."
         emitter.log(f"Segmentos ausentes após o download: {preview}", "error")
-        return False, output_path
+        return None
+
+    return final_path, inits
+
+
+def _concat_hls_track(segments, part_dir, inits, out_path, emitter) -> bool:
+    import shutil
 
     emitter.log("Unificando segmentos...", "info")
     try:
-        with open(output_path, "wb") as out:
-            for i, _ in parts:
+        with open(out_path, "wb") as out:
+            current_init = None
+            for i, seg in enumerate(segments):
+                key = _init_section_key(seg)
+                # A seção de inicialização vai antes do primeiro segmento que a
+                # usa e de novo sempre que a playlist troca de seção.
+                if key is not None and key != current_init:
+                    with open(inits[key], "rb") as f:
+                        shutil.copyfileobj(f, out, length=64 * 1024 * 1024)
+                    current_init = key
                 seg_path = os.path.join(part_dir, f"segment_{i}.ts")
                 if not os.path.exists(seg_path):
                     emitter.log(f"Segmento {i} ausente: {seg_path}", "error")
-                    return False, output_path
+                    return False
                 with open(seg_path, "rb") as pf:
                     shutil.copyfileobj(pf, out, length=64 * 1024 * 1024)
         emitter.log("Unificação concluída!", "success")
+        return True
     except OSError as e:
         emitter.log(f"Erro ao unificar segmentos: {e}", "error")
-        return False, output_path
+        return False
 
-    if not output_path.lower().endswith(".ts"):
-        from core.file_utils import make_unique_path as _mk_unique
-        new_path = _mk_unique(os.path.splitext(output_path)[0] + ".ts")
+
+def _fetch_init_section(session, key, path, connect_timeout, stop_event) -> bool:
+    from core.constants import READ_TIMEOUT, RETRY_LIMIT
+
+    uri, byterange = key
+    headers = {"Accept-Encoding": "identity"}
+    if byterange:
+        length_raw, _, offset_raw = byterange.partition("@")
         try:
-            os.rename(output_path, new_path)
-            # Avisa o pai que o arquivo final mudou de extensão — o histórico
-            # precisa do caminho real para que cliques no item abram o arquivo.
-            output_path = new_path
-            emitter.send("resolved_path", new_path)
-        except OSError as e:
-            emitter.log(f"Aviso: não foi possível renomear para .ts: {e}", "warning")
+            length = int(length_raw)
+            offset = int(offset_raw) if offset_raw else 0
+        except ValueError:
+            return False
+        headers["Range"] = f"bytes={offset}-{offset + length - 1}"
 
-    time.sleep(0.3)
-    try:
-        shutil.rmtree(part_dir, ignore_errors=True)
-    except Exception:
-        pass
+    for attempt in range(RETRY_LIMIT):
+        if stop_event.is_set():
+            return False
+        try:
+            r = session.get(uri, headers=headers, timeout=(connect_timeout, READ_TIMEOUT))
+            r.raise_for_status()
+            if r.status_code not in (200, 206) or not r.content:
+                raise IOError(f"HTTP {r.status_code} sem conteúdo")
+            data = r.content
+            if byterange and r.status_code == 200:
+                # Servidor ignorou o Range: recorta o trecho pedido.
+                data = data[offset:offset + length]
+            tmp = f"{path}.part"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+            return True
+        except Exception:
+            if stop_event.wait(1):
+                return False
+    return False
 
-    return True, output_path
+
+def _hls_segment_crypto(segments, base_sequence, session, emitter):
+    """
+    Lista, por segmento, (chave, IV) para AES-128 ou None se o segmento é
+    aberto. Retorna None (com log) se a proteção não é suportada ou uma
+    chave não pôde ser obtida.
+    """
+    keys: dict = {}
+    result = []
+    for index, seg in enumerate(segments):
+        key = getattr(seg, "key", None)
+        method = ((getattr(key, "method", None) or "NONE") if key else "NONE").upper()
+        if method == "NONE":
+            result.append(None)
+            continue
+        keyformat = (getattr(key, "keyformat", None) or "identity").lower()
+        if method != "AES-128" or keyformat != "identity":
+            # SAMPLE-AES e DRM (FairPlay/Widevine) cifram por dentro do vídeo;
+            # "decifrar" como AES-128 geraria um arquivo ilegível.
+            emitter.log(
+                f"Este vídeo usa proteção {method} ({keyformat}), que o Downloader "
+                "não consegue abrir. O download foi interrompido.",
+                "error",
+            )
+            return None
+        uri = key.absolute_uri
+        if uri not in keys:
+            key_bytes = _fetch_aes_key(session, uri, emitter, quiet=bool(keys))
+            if key_bytes is None:
+                return None
+            keys[uri] = key_bytes
+        result.append((keys[uri], _get_iv(key, base_sequence, index)))
+    return result
+
+
+def _hls_segment_ranges(segments):
+    """
+    Lista, por segmento, o header Range (EXT-X-BYTERANGE) ou None.
+    Sem offset explícito, o trecho começa onde terminou o anterior do mesmo
+    arquivo. Retorna None se algum trecho for inválido.
+    """
+    next_offset: dict = {}
+    result = []
+    for seg in segments:
+        byterange = getattr(seg, "byterange", None)
+        if not byterange:
+            result.append(None)
+            continue
+        uri = seg.absolute_uri
+        length_raw, _, offset_raw = str(byterange).partition("@")
+        try:
+            length = int(length_raw)
+            start = int(offset_raw) if offset_raw else next_offset.get(uri, 0)
+        except ValueError:
+            return None
+        if length <= 0:
+            return None
+        result.append(f"bytes={start}-{start + length - 1}")
+        next_offset[uri] = start + length
+    return result
 
 
 def _hls_download_parts(
     parts, part_dir, session, chunk_size, max_workers,
-    key_bytes, key_info, base_sequence,
     counter_proxy, stop_event, pause_event, emitter, response_tracker,
+    connect_timeout,
 ):
     failed: set = set()
     completed = 0
@@ -756,11 +1013,11 @@ def _hls_download_parts(
                 _hls_download_segment,
                 url,
                 os.path.join(part_dir, f"segment_{idx}.ts"),
-                idx, session, chunk_size, key_bytes, key_info,
-                base_sequence, counter_proxy, stop_event, pause_event,
-                response_tracker,
+                session, chunk_size, range_header, crypto,
+                counter_proxy, stop_event, pause_event,
+                response_tracker, connect_timeout,
             ): idx
-            for idx, url in parts
+            for idx, url, range_header, crypto in parts
         }
 
         for future in as_completed(futures):
@@ -789,10 +1046,19 @@ def _hls_download_parts(
 
 
 def _hls_download_segment(
-    url, filepath, index, session, chunk_size, key_bytes, key_info,
-    base_sequence, counter_proxy, stop_event, pause_event, response_tracker,
+    url, filepath, session, chunk_size, range_header, crypto,
+    counter_proxy, stop_event, pause_event, response_tracker,
+    connect_timeout,
 ) -> bool:
-    from core.constants import CONNECT_TIMEOUT, READ_TIMEOUT, RETRY_LIMIT
+    """
+    Baixa um segmento para `filepath`. `range_header` recorta o segmento de
+    um arquivo maior (EXT-X-BYTERANGE); `crypto` é (chave, IV) para AES-128.
+    """
+    from core.constants import READ_TIMEOUT, RETRY_LIMIT
+
+    headers = {"Accept-Encoding": "identity"}
+    if range_header:
+        headers["Range"] = range_header
 
     if os.path.exists(filepath):
         try:
@@ -815,21 +1081,25 @@ def _hls_download_segment(
             time.sleep(0.05)
 
         try:
-            use_aes = key_bytes is not None and key_info is not None
-            encrypted_buf = bytearray() if use_aes else None
+            encrypted_buf = bytearray() if crypto is not None else None
             expected_len = None
             received = 0
 
             with session.get(
                 url,
-                headers={"Accept-Encoding": "identity"},
+                headers=headers,
                 stream=True,
-                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                timeout=(connect_timeout, READ_TIMEOUT),
             ) as r:
                 if response_tracker is not None:
                     response_tracker.add(r)
                 try:
                     r.raise_for_status()
+                    if r.status_code not in (200, 206):
+                        raise IOError(f"segmento HLS sem conteúdo (HTTP {r.status_code})")
+                    if range_header and r.status_code != 206:
+                        # Sem 206 o servidor mandaria o arquivo inteiro, não o trecho.
+                        raise IOError("servidor ignorou o trecho do segmento (sem HTTP 206)")
                     raw_len = r.headers.get("Content-Length")
                     if raw_len:
                         try:
@@ -872,7 +1142,7 @@ def _hls_download_segment(
 
             if encrypted_buf is not None:
                 from Crypto.Cipher import AES  # type: ignore
-                iv = _get_iv(key_info, base_sequence, index)
+                key_bytes, iv = crypto
                 cipher = AES.new(key_bytes, AES.MODE_CBC, iv)
                 data = cipher.decrypt(bytes(encrypted_buf))
                 pad_len = data[-1] if data else 0
@@ -910,7 +1180,8 @@ def _hls_download_segment(
     return False
 
 
-def _fetch_aes_key(session, key_info, emitter):
+def _fetch_aes_key(session, key_uri, emitter, quiet=False):
+    """Baixa a chave AES-128 (16 bytes). `quiet` evita repetir o log a cada troca de chave."""
     try:
         import Crypto  # noqa: F401
     except ImportError:
@@ -918,11 +1189,12 @@ def _fetch_aes_key(session, key_info, emitter):
             "pycryptodome não instalado. Execute: pip install pycryptodome",
             "error",
         )
-        return None, None
+        return None
 
-    emitter.log("Criptografia AES-128 detectada. Buscando chave...", "warning")
+    if not quiet:
+        emitter.log("Criptografia AES-128 detectada. Buscando chave...", "warning")
     try:
-        r = session.get(key_info.absolute_uri, timeout=10)
+        r = session.get(key_uri, timeout=10)
         r.raise_for_status()
         key = r.content
         if len(key) != 16:
@@ -930,12 +1202,13 @@ def _fetch_aes_key(session, key_info, emitter):
                 f"Chave AES inválida: {len(key)} bytes (esperado 16).",
                 "error",
             )
-            return None, None
-        emitter.log("Chave de descriptografia obtida!", "success")
-        return key, key_info
+            return None
+        if not quiet:
+            emitter.log("Chave de descriptografia obtida!", "success")
+        return key
     except Exception as e:
         emitter.log(f"Erro ao obter chave AES: {e}", "error")
-        return None, None
+        return None
 
 
 def _get_iv(key_info, base_sequence: int, index: int) -> bytes:
@@ -947,6 +1220,54 @@ def _get_iv(key_info, base_sequence: int, index: int) -> bytes:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _looks_like_hls_playlist(session, url, total_size, content_type, connect_timeout) -> bool:
+    """
+    Lê o começo de arquivos pequenos de tipo genérico procurando "#EXTM3U".
+    Vídeo/áudio declarado ou arquivo grande não é consultado (playlist tem KBs).
+    """
+    if content_type.startswith(("video/", "audio/")):
+        return False
+    if total_size is not None and total_size >= 1024 * 1024:
+        return False
+    try:
+        with session.get(
+            url, headers={"Range": "bytes=0-63"}, stream=True,
+            timeout=(connect_timeout, 10),
+        ) as r:
+            if r.status_code not in (200, 206):
+                return False
+            head = r.raw.read(64, decode_content=True) or b""
+    except Exception:
+        return False
+    return head.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"#EXTM3U")
+
+
+def _log_dash_unsupported(emitter) -> None:
+    emitter.log(
+        "Links DASH (.mpd) não são suportados: esse arquivo é só a lista das "
+        "partes do vídeo, não o vídeo. Use um link .m3u8 ou .mp4 da mesma página.",
+        "error",
+    )
+
+
+def _finalize_outputs(outputs, emitter) -> None:
+    """Dá o nome final a cada arquivo verificado e informa o caminho real ao pai."""
+    from core.file_utils import finalize_partial
+
+    for index, (partial, final, label) in enumerate(outputs):
+        saved = finalize_partial(partial, final)
+        if saved != final:
+            emitter.log(
+                f"'{os.path.basename(final)}' passou a existir durante o download; "
+                f"salvo como '{os.path.basename(saved)}'.",
+                "warning",
+            )
+        if index == 0:
+            emitter.send("resolved_path", saved)
+        elif label == "audio":
+            emitter.log(f"Áudio salvo separado em: {saved}", "warning")
+
 
 def _verify_final_size(path, expected_size, log_fn) -> bool:
     if expected_size is None:

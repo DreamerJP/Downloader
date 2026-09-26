@@ -3,9 +3,8 @@ ui/main_window.py
 Orquestrador principal da UI. Gerencia abas, workers, timers e persistência.
 """
 
-import hashlib
 import os
-import shutil
+import re
 
 from PyQt6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout,
@@ -14,9 +13,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QTimer, QSettings, Qt
 from PyQt6.QtGui import QIcon
 
-from core.constants import UPDATE_INTERVAL, HISTORY_FILE, TEMP_DIR
-from core.download_history import DownloadHistory
+from core.constants import UPDATE_INTERVAL, HISTORY_FILE
+from core.download_history import (
+    DownloadHistory, STATUS_CANCELLED, STATUS_DONE, STATUS_FAILED,
+)
 from core.file_utils import get_resource_path
+from core.secret_store import is_protected, protect, unprotect
 from core.speed_calculator import SpeedCalculator
 from core.updater import Updater, UpdateCheckError, get_app_version
 from core.windows_taskbar import WindowsTaskbarProgress
@@ -29,6 +31,12 @@ from ui.dialogs.settings_dialog import SettingsDialog
 from ui.dialogs.about_dialog import AboutDialog
 from ui.dialogs.update_dialog import UpdateDialog
 from ui.dialogs.update_progress_dialog import UpdateProgressDialog
+
+
+# Configurações gravadas cifradas (o proxy pode levar usuário:senha na URL).
+_SECRET_SETTINGS = ("proxy_url", "auth_pass")
+
+_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 
 class MainWindow(QMainWindow):
@@ -47,18 +55,18 @@ class MainWindow(QMainWindow):
         # finished_signal — segura a referência até QThread.finished disparar
         # para não destruir o QThread enquanto a thread ainda executa.
         self._zombie_workers: list = []
-        # Config do download pausado (worker antigo já foi encerrado). Quando
-        # não-None, o botão de Retomar cria um novo worker com is_resume=True.
-        self._paused_config: dict | None = None
+        # Worker do download pausado (processo já encerrado). Quando não-None,
+        # o botão Retomar cria um worker novo a partir dele.
+        self._paused_worker: DownloadWorker | None = None
         self.taskbar_progress = WindowsTaskbarProgress()
         self._taskbar_token = 0
         self.settings = QSettings("DreamerJP", "DownloaderV2")
 
         self.app_settings = {
-            "proxy_url":       self.settings.value("proxy_url", ""),
+            "proxy_url":       self._load_secret("proxy_url"),
             "connect_timeout": int(self.settings.value("connect_timeout", 5)),
             "auth_user":       self.settings.value("auth_user", ""),
-            "auth_pass":       self.settings.value("auth_pass", ""),
+            "auth_pass":       self._load_secret("auth_pass"),
             "x3d_opt":         self.settings.value("x3d_opt", False, type=bool),
         }
 
@@ -74,18 +82,45 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(3000, self._check_for_updates)
 
-    def closeEvent(self, event):
-        # Encerra qualquer worker ativo antes de a UI fechar — evita warning
-        # "QThread: Destroyed while thread is still running" e processo filho
-        # virar órfão.
-        if self.worker is not None:
+    def _load_secret(self, key: str) -> str:
+        stored = self.settings.value(key, "") or ""
+        value = unprotect(stored)
+        if stored and not is_protected(stored):
+            # Valor gravado em texto puro por versão antiga: regrava cifrado.
             try:
-                self.worker.stop()
-            except Exception:
+                self.settings.setValue(key, protect(value))
+            except OSError:
                 pass
-        for w in (*self._zombie_workers, self.worker):
-            if w is None:
-                continue
+        return value
+
+    def _has_unfinished_download(self) -> bool:
+        return self.worker is not None or self._paused_worker is not None
+
+    def _discard_unfinished_download(self) -> None:
+        """Cancela o download ativo ou pausado e espera os parciais serem apagados."""
+        worker = self.worker
+        if worker is not None:
+            worker.stop()
+            worker.wait_cleanup(15)
+        elif self._paused_worker is not None:
+            self._abort_paused_download()
+
+    def closeEvent(self, event):
+        if self._has_unfinished_download():
+            answer = QMessageBox.question(
+                self,
+                "Fechar o Downloader",
+                "Há um download em andamento ou pausado. Fechar agora cancela o "
+                "download e apaga o que já foi baixado.\n\nFechar mesmo assim?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self._discard_unfinished_download()
+
+        # Espera os QThreads terminarem — evita "QThread: Destroyed while
+        # thread is still running" e processo filho órfão.
+        for w in self._zombie_workers:
             try:
                 w.wait(2000)
             except Exception:
@@ -138,7 +173,15 @@ class MainWindow(QMainWindow):
 
         output   = self.download_tab.path_input.text().strip()
         threads  = self.download_tab.threads_input.value()
-        checksum = self.download_tab.checksum_input.text().strip()
+        checksum = "".join(self.download_tab.checksum_input.text().split())
+        if checksum and not _SHA256_RE.fullmatch(checksum):
+            QMessageBox.warning(
+                self,
+                "Checksum inválido",
+                "O Checksum precisa ser um SHA256: 64 caracteres de 0 a 9 e a a f.\n"
+                "Corrija ou apague o campo para baixar sem verificação.",
+            )
+            return
 
         # Worker anterior em estado de cleanup pós-cancelamento? Marca como
         # abandonado para que ele não apague arquivos do novo download, e
@@ -158,6 +201,7 @@ class MainWindow(QMainWindow):
         self.speed_calc.reset()
         self.download_tab.progress_bar.setValue(0)
         self.download_tab.speed_chart.reset_chart()
+        self.download_tab.segments_map.update_map(0, [])
         self.download_tab.log_output.clear()
 
         # Criar Worker — recebe o AtomicCounter do SpeedCalculator
@@ -166,7 +210,7 @@ class MainWindow(QMainWindow):
             output_path=output,
             threads=threads,
             speed_counter=self.speed_calc.counter,
-            checksum=checksum if len(checksum) == 64 else None,
+            checksum=checksum or None,
             proxy=(
                 {"http": self.app_settings["proxy_url"], "https": self.app_settings["proxy_url"]}
                 if self.app_settings["proxy_url"] else None
@@ -179,13 +223,7 @@ class MainWindow(QMainWindow):
             custom_headers=self.download_tab.custom_headers,
             x3d_opt=self.app_settings["x3d_opt"],
         )
-
-        # Telemetria principal vem pelo QTimer; signals só notificam eventos.
-        self.worker.log_signal.connect(self.download_tab.add_log)
-        self.worker.total_size_signal.connect(self._on_worker_total_size)
-        self.worker.finished_signal.connect(self._on_worker_finished)
-        self.worker.segments_map_signal.connect(self.download_tab.segments_map.update_map)
-        self.worker.segment_done_signal.connect(self._on_worker_segment_done)
+        self._connect_worker(self.worker)
 
         self._taskbar_token += 1
         self.taskbar_progress.set_progress(0.0)
@@ -199,8 +237,18 @@ class MainWindow(QMainWindow):
             f"Iniciando download em modo paralelo ({threads} threads)...", "info"
         )
 
+    def _connect_worker(self, worker: DownloadWorker) -> None:
+        # Telemetria principal vem pelo QTimer; signals só notificam eventos.
+        worker.log_signal.connect(self.download_tab.add_log)
+        worker.total_size_signal.connect(self._on_worker_total_size)
+        worker.finished_signal.connect(
+            lambda ok, msg, w=worker: self._on_worker_finished(w, ok, msg)
+        )
+        worker.segments_map_signal.connect(self.download_tab.segments_map.update_map)
+        worker.segment_done_signal.connect(self._on_worker_segment_done)
+
     def _toggle_pause(self):
-        if self._paused_config is not None:
+        if self._paused_worker is not None:
             self._resume_paused_download()
         elif self.worker is not None:
             self._pause_active_download()
@@ -214,21 +262,8 @@ class MainWindow(QMainWindow):
         if w is None:
             return
 
-        # Snapshot da config para criar o worker de retomada depois.
-        self._paused_config = {
-            "url": w.url,
-            "output_path": w._final_path or w.output_path,
-            "threads": w.threads,
-            "checksum": w.expected_checksum,
-            "proxy": w.proxy,
-            "auth": w.auth,
-            "auto_detect_quality": w.auto_detect_quality,
-            "connect_timeout": w.connect_timeout,
-            "custom_headers": w.custom_headers,
-            "x3d_opt": w.x3d_opt,
-        }
-
         w.pause()  # terminate + preserva arquivos
+        self._paused_worker = w
         self._retire_worker(w)
         self.worker = None
 
@@ -248,32 +283,34 @@ class MainWindow(QMainWindow):
         )
 
     def _resume_paused_download(self):
-        """Cria um novo worker com is_resume=True, que retoma do estado salvo."""
-        cfg = self._paused_config
-        if cfg is None:
+        """Cria um novo worker que continua do estado salvo pelo pausado."""
+        old = self._paused_worker
+        if old is None:
             return
-        self._paused_config = None
+        self._paused_worker = None
+        # O loop do worker pausado precisa ter lido todo o Pipe para o caminho
+        # final estar disponível; normalmente já terminou.
+        old.wait(3000)
 
+        # Sem caminho final o engine ainda não tinha criado nada: recomeça como
+        # download novo (com nome único), nunca "retoma" em cima do que o
+        # usuário digitou, que pode ser um arquivo existente.
+        resume_path = old.final_path
         self.worker = DownloadWorker(
-            url=cfg["url"],
-            output_path=cfg["output_path"],
-            threads=cfg["threads"],
+            url=old.url,
+            output_path=resume_path or old.output_path,
+            threads=old.threads,
             speed_counter=self.speed_calc.counter,
-            checksum=cfg["checksum"],
-            proxy=cfg["proxy"],
-            auth=cfg["auth"],
-            auto_detect_quality=cfg["auto_detect_quality"],
-            connect_timeout=cfg["connect_timeout"],
-            custom_headers=cfg["custom_headers"],
-            x3d_opt=cfg["x3d_opt"],
-            is_resume=True,
+            checksum=old.expected_checksum,
+            proxy=old.proxy,
+            auth=old.auth,
+            auto_detect_quality=old.auto_detect_quality,
+            connect_timeout=old.connect_timeout,
+            custom_headers=old.custom_headers,
+            x3d_opt=old.x3d_opt,
+            is_resume=resume_path is not None,
         )
-
-        self.worker.log_signal.connect(self.download_tab.add_log)
-        self.worker.total_size_signal.connect(self._on_worker_total_size)
-        self.worker.finished_signal.connect(self._on_worker_finished)
-        self.worker.segments_map_signal.connect(self.download_tab.segments_map.update_map)
-        self.worker.segment_done_signal.connect(self._on_worker_segment_done)
+        self._connect_worker(self.worker)
 
         self._taskbar_token += 1
         self.taskbar_progress.set_progress(0.0)
@@ -289,34 +326,20 @@ class MainWindow(QMainWindow):
     def _stop_download(self):
         if self.worker:
             self.worker.stop()
-        elif self._paused_config is not None:
+        elif self._paused_worker is not None:
             # Stop num download pausado: limpa os arquivos preservados.
             self._abort_paused_download()
 
     def _purge_paused_files(self):
         """
-        Apaga arquivos parciais e os part_dirs determinísticos (swarm/hls) do
-        download em pausa, sem mexer na UI. Limpa `_paused_config` ao final.
+        Apaga o arquivo em andamento e os part_dirs (swarm/hls) que o engine
+        do download pausado declarou ter criado, sem mexer na UI.
         """
-        cfg = self._paused_config
-        self._paused_config = None
-        if not cfg:
-            return
-        out = cfg.get("output_path")
-        if out and os.path.isfile(out):
-            try:
-                os.remove(out)
-            except OSError:
-                pass
-        if out:
-            h = hashlib.md5(out.encode("utf-8")).hexdigest()[:12]
-            for prefix in ("swarm_", "hls_"):
-                d = os.path.join(TEMP_DIR, f"{prefix}{h}")
-                if os.path.isdir(d):
-                    try:
-                        shutil.rmtree(d, ignore_errors=True)
-                    except Exception:
-                        pass
+        old = self._paused_worker
+        self._paused_worker = None
+        if old is not None:
+            old.remove_partial_files()
+            self._record_history(old, STATUS_CANCELLED)
 
     def _abort_paused_download(self):
         """Stop em download pausado: limpa arquivos e reseta a UI."""
@@ -361,13 +384,29 @@ class MainWindow(QMainWindow):
     def _on_worker_total_size(self, total):
         if isinstance(total, dict):
             if total.get("mode") == "segments":
-                self.speed_calc.set_total_segments(total["total"])
+                self.speed_calc.set_total_segments(total["total"], total.get("done", 0))
         else:
             self.speed_calc.set_total_bytes(total)
 
-    def _on_worker_finished(self, success, message):
-        # Estado de pausa não se aplica mais — limpa ao chegar aqui.
-        self._paused_config = None
+    def _record_history(self, worker: DownloadWorker, status: str) -> None:
+        path = worker.final_path or ""
+        size = 0
+        if status == STATUS_DONE and path and os.path.isfile(path):
+            size = os.path.getsize(path)
+        self.history.add(
+            url=worker.url,
+            output_path=path,
+            size=size,
+            duration=self.speed_calc.get_duration(),
+            status=status,
+        )
+        self.history_tab.refresh(self.history.history)
+
+    def _on_worker_finished(self, worker, success, message):
+        # Sinal atrasado de um worker que já não é o atual (pausado, trocado):
+        # tratá-lo apagaria o estado do download em curso.
+        if worker is not self.worker:
+            return
         self.timer.stop()
 
         self.download_tab.start_btn.setEnabled(True)
@@ -380,22 +419,14 @@ class MainWindow(QMainWindow):
             self.taskbar_progress.set_progress(1.0)
             self.download_tab.speed_chart.mark_download_complete()
             self.speed_calc.stop_tracking()
-            snap = self.speed_calc.get_snapshot()
-            duration = self.speed_calc.get_duration()
-
-            # Usa o caminho real onde o arquivo foi salvo (pode ter sufixo
-            # "(1)", virado .ts no HLS, etc), e não o input cru do usuário.
-            saved_path = self.worker._final_path or self.worker.output_path
-            self.history.add(
-                url=self.worker.url,
-                output_path=saved_path,
-                size=snap["downloaded_bytes"],
-                duration=duration,
-                success=True,
-            )
-            self.history_tab.refresh(self.history.history)
+            # Caminho real informado pelo engine (pode ter sufixo "(1)",
+            # virado .ts no HLS, etc), e não o input cru do usuário.
+            self._record_history(worker, STATUS_DONE)
             self.download_tab.add_log(message, "success")
         else:
+            self._record_history(
+                worker, STATUS_CANCELLED if worker.stopped_by_user else STATUS_FAILED
+            )
             self.download_tab.progress_bar.setValue(0)
             self.download_tab.speed_chart.reset_chart()
             self.speed_calc.reset()
@@ -408,7 +439,7 @@ class MainWindow(QMainWindow):
         token = self._taskbar_token
         QTimer.singleShot(1800, lambda: self._clear_taskbar_if_current(token))
 
-        self._retire_worker(self.worker)
+        self._retire_worker(worker)
         self.worker = None
 
     def _on_timer_tick(self):
@@ -445,6 +476,8 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self.app_settings = dlg.get_settings()
             for k, v in self.app_settings.items():
+                if k in _SECRET_SETTINGS:
+                    v = protect(v)
                 self.settings.setValue(k, v)
             self.download_tab.add_log("Configurações atualizadas.", "success")
 
@@ -531,6 +564,19 @@ class MainWindow(QMainWindow):
         dlg = UpdateDialog(info, self)
         if not dlg.exec():
             return
+
+        if self._has_unfinished_download():
+            # O processo do download roda do mesmo .exe: vivo, ele impede a
+            # troca do arquivo e o app fecharia sem reabrir.
+            answer = QMessageBox.question(
+                self,
+                "Atualizar agora",
+                "Atualizar agora cancela o download em andamento ou pausado e "
+                "apaga o que já foi baixado.\n\nContinuar?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self._discard_unfinished_download()
 
         # Diálogo de progresso
         progress_dlg = UpdateProgressDialog(self)
